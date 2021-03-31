@@ -12,6 +12,7 @@ from rest_framework.permissions import IsAdminUser, IsAuthenticated, AllowAny
 from rest_framework.response import Response
 
 from core.common.mixins import ListWithHeadersMixin
+from core.common.utils import parse_updated_since_param
 from core.common.views import BaseAPIView, BaseLogoView
 from core.orgs.models import Organization
 from core.users.constants import VERIFICATION_TOKEN_MISMATCH, VERIFY_EMAIL_MESSAGE
@@ -45,15 +46,16 @@ class UserBaseView(BaseAPIView):
     pk_field = 'username'
     model = UserProfile
     queryset = UserProfile.objects.filter(is_active=True)
-    es_fields = {
-        'username': {'sortable': True, 'filterable': True, 'exact': True},
-        'date_joined': {'sortable': True, 'default': 'asc', 'filterable': False},
-        'company': {'sortable': True, 'filterable': True, 'exact': True},
-        'location': {'sortable': True, 'filterable': True, 'exact': True},
-    }
+    es_fields = UserProfile.es_fields
     document_model = UserProfileDocument
     is_searchable = True
-    default_qs_sort_attr = '-created_at'
+    default_qs_sort_attr = '-date_joined'
+
+    def get_queryset(self):
+        updated_since = parse_updated_since_param(self.request.query_params)
+        if updated_since:
+            self.queryset = self.queryset.filter(updated_at__gte=updated_since)
+        return self.queryset
 
 
 class UserLogoView(UserBaseView, BaseLogoView):

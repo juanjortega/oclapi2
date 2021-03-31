@@ -249,6 +249,48 @@ class SourceTest(OCLTestCase):
         self.assertEqual(source.last_concept_update, concept.updated_at)
         self.assertEqual(source.last_child_update, source.last_concept_update)
 
+    def test_new_version_should_not_affect_last_child_update(self):
+        source = OrganizationSourceFactory(version=HEAD)
+        source_updated_at = source.updated_at
+        source_last_child_update = source.last_child_update
+
+        self.assertIsNotNone(source.id)
+        self.assertEqual(source_updated_at, source_last_child_update)
+
+        concept = ConceptFactory(sources=[source], parent=source)
+        source.refresh_from_db()
+
+        self.assertEqual(source.updated_at, source_updated_at)
+        self.assertEqual(source.last_child_update, concept.updated_at)
+        self.assertNotEqual(source.last_child_update, source_updated_at)
+        self.assertNotEqual(source.last_child_update, source_last_child_update)
+        source_last_child_update = source.last_child_update
+
+        source_v1 = OrganizationSourceFactory.build(version='v1', mnemonic=source.mnemonic, organization=source.parent)
+        Source.persist_new_version(source_v1, source.created_by)
+        source_v1 = source.versions.filter(version='v1').first()
+        source.refresh_from_db()
+
+        self.assertIsNotNone(source_v1.id)
+        self.assertEqual(source.last_child_update, source_last_child_update)
+        self.assertEqual(source.updated_at, source_updated_at)
+
+        source_v1_updated_at = source_v1.updated_at
+        source_v1_last_child_update = source_v1.last_child_update
+
+        source_v2 = OrganizationSourceFactory.build(version='v2', mnemonic=source.mnemonic, organization=source.parent)
+        Source.persist_new_version(source_v2, source.created_by)
+        source_v2 = source.versions.filter(version='v2').first()
+        source.refresh_from_db()
+        source_v1.refresh_from_db()
+
+        self.assertIsNotNone(source_v2.id)
+
+        self.assertEqual(source.last_child_update, source_last_child_update)
+        self.assertEqual(source.updated_at, source_updated_at)
+        self.assertEqual(source_v1.last_child_update, source_v1_last_child_update)
+        self.assertEqual(source_v1.updated_at, source_v1_updated_at)
+
     def test_source_active_inactive_should_affect_children(self):
         source = OrganizationSourceFactory(is_active=True)
         concept = ConceptFactory(parent=source, is_active=True)
@@ -325,6 +367,12 @@ class SourceTest(OCLTestCase):
         async_result_instance_mock = Mock(successful=Mock(return_value=True))
         async_result_klass_mock.return_value = async_result_instance_mock
 
+        source._background_process_ids = [None, '']  # pylint: disable=protected-access
+        source.save()
+
+        self.assertFalse(source.is_processing)
+        self.assertEqual(source._background_process_ids, [])  # pylint: disable=protected-access
+
         source._background_process_ids = ['1', '2', '3']  # pylint: disable=protected-access
         source.save()
 
@@ -348,6 +396,52 @@ class SourceTest(OCLTestCase):
 
         self.assertTrue(source.is_processing)
         self.assertEqual(source._background_process_ids, [1, 2, 3])  # pylint: disable=protected-access
+
+    @patch('core.common.models.AsyncResult')
+    def test_is_exporting(self, async_result_klass_mock):
+        source = OrganizationSourceFactory()
+        self.assertFalse(source.is_exporting)
+
+        async_result_instance_mock = Mock(successful=Mock(return_value=True))
+        async_result_klass_mock.return_value = async_result_instance_mock
+
+        source._background_process_ids = [None, '']  # pylint: disable=protected-access
+        source.save()
+
+        self.assertFalse(source.is_exporting)
+
+        source._background_process_ids = ['1', '2', '3']  # pylint: disable=protected-access
+        source.save()
+
+        self.assertFalse(source.is_exporting)
+
+        async_result_instance_mock = Mock(successful=Mock(return_value=False), failed=Mock(return_value=True))
+        async_result_klass_mock.return_value = async_result_instance_mock
+
+        source._background_process_ids = [1, 2, 3]  # pylint: disable=protected-access
+        source.save()
+
+        self.assertFalse(source.is_exporting)
+
+        async_result_instance_mock = Mock(successful=Mock(return_value=False), failed=Mock(return_value=False))
+        async_result_instance_mock.name = 'core.common.tasks.foobar'
+        async_result_klass_mock.return_value = async_result_instance_mock
+
+        source._background_process_ids = [1, 2, 3]  # pylint: disable=protected-access
+        source.save()
+
+        self.assertFalse(source.is_exporting)
+
+        async_result_instance_mock = Mock(
+            name='core.common.tasks.export_source', successful=Mock(return_value=False), failed=Mock(return_value=False)
+        )
+        async_result_instance_mock.name = 'core.common.tasks.export_source'
+        async_result_klass_mock.return_value = async_result_instance_mock
+
+        source._background_process_ids = [1, 2, 3]  # pylint: disable=protected-access
+        source.save()
+
+        self.assertTrue(source.is_exporting)
 
     def test_add_processing(self):
         source = OrganizationSourceFactory()

@@ -1,7 +1,7 @@
 from celery.result import AsyncResult
 from django.conf import settings
 from django.contrib.contenttypes.fields import GenericRelation
-from django.contrib.postgres.fields import JSONField, ArrayField
+from django.contrib.postgres.fields import ArrayField
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models, IntegrityError
@@ -10,7 +10,7 @@ from django.db.models.expressions import CombinedExpression, F
 from django.utils import timezone
 from django_elasticsearch_dsl.registries import registry
 from django_elasticsearch_dsl.signals import RealTimeSignalProcessor
-from pydash import get, compact
+from pydash import get
 
 from core.common.services import S3
 from core.common.utils import reverse_resource, reverse_resource_version, parse_updated_since_param, drop_version
@@ -20,7 +20,7 @@ from .constants import (
     ACCESS_TYPE_CHOICES, DEFAULT_ACCESS_TYPE, NAMESPACE_REGEX,
     ACCESS_TYPE_VIEW, ACCESS_TYPE_EDIT, SUPER_ADMIN_USER_ID,
     HEAD, PERSIST_NEW_ERROR_MESSAGE, SOURCE_PARENT_CANNOT_BE_NONE, PARENT_RESOURCE_CANNOT_BE_NONE,
-    CREATOR_CANNOT_BE_NONE, CANNOT_DELETE_ONLY_VERSION)
+    CREATOR_CANNOT_BE_NONE, CANNOT_DELETE_ONLY_VERSION, CUSTOM_VALIDATION_SCHEMA_OPENMRS)
 from .tasks import handle_save, handle_m2m_changed, seed_children
 
 
@@ -54,7 +54,7 @@ class BaseModel(models.Model):
         default=SUPER_ADMIN_USER_ID,
     )
     is_active = models.BooleanField(default=True)
-    extras = JSONField(null=True, blank=True, default=dict)
+    extras = models.JSONField(null=True, blank=True, default=dict)
     uri = models.TextField(null=True, blank=True, db_index=True)
     extras_have_been_encoded = False
     extras_have_been_decoded = False
@@ -67,6 +67,10 @@ class BaseModel(models.Model):
     @property
     def app_name(self):
         return self.__module__.split('.')[1]
+
+    def index(self):
+        if not get(settings, 'TEST_MODE', False):
+            handle_save.delay(self.app_name, self.model_name, self.id)
 
     def save(self, force_insert=False, force_update=False, using=None, update_fields=None):
         if not self.internal_reference_id and self.id:
@@ -233,7 +237,7 @@ class BaseResourceModel(BaseModel, CommonLogoModel):
 
 class VersionedModel(BaseResourceModel):
     version = models.CharField(max_length=255)
-    released = models.NullBooleanField(default=False, blank=True, null=True)
+    released = models.BooleanField(default=False, blank=True, null=True)
     retired = models.BooleanField(default=False)
     is_latest_version = models.BooleanField(default=True)
     name = models.TextField()
@@ -328,9 +332,9 @@ class ConceptContainerModel(VersionedModel):
     _background_process_ids = ArrayField(models.CharField(max_length=255), default=list, null=True, blank=True)
 
     canonical_url = models.URLField(null=True, blank=True)
-    identifier = JSONField(null=True, blank=True, default=dict)
-    contact = JSONField(null=True, blank=True, default=dict)
-    jurisdiction = JSONField(null=True, blank=True, default=dict)
+    identifier = models.JSONField(null=True, blank=True, default=dict)
+    contact = models.JSONField(null=True, blank=True, default=dict)
+    jurisdiction = models.JSONField(null=True, blank=True, default=dict)
     publisher = models.TextField(null=True, blank=True)
     purpose = models.TextField(null=True, blank=True)
     copyright = models.TextField(null=True, blank=True)
@@ -339,9 +343,14 @@ class ConceptContainerModel(VersionedModel):
     client_configs = GenericRelation(
         'client_configs.ClientConfig', object_id_field='resource_id', content_type_field='resource_type'
     )
+    snapshot = models.JSONField(null=True, blank=True, default=dict)
 
     class Meta:
         abstract = True
+
+    @property
+    def is_openmrs_schema(self):
+        return self.custom_validation_schema == CUSTOM_VALIDATION_SCHEMA_OPENMRS
 
     @property
     def active_concepts(self):
@@ -529,12 +538,17 @@ class ConceptContainerModel(VersionedModel):
 
     @classmethod
     def persist_new_version(cls, obj, user=None, **kwargs):
+        from core.collections.serializers import CollectionDetailSerializer
+        from core.sources.serializers import SourceDetailSerializer
+
         errors = dict()
 
         obj.is_active = True
         if user:
             obj.created_by = user
             obj.updated_by = user
+        serializer = SourceDetailSerializer if obj.__class__.__name__ == 'Source' else CollectionDetailSerializer
+        obj.snapshot = serializer(obj.head).data
         obj.update_version_data()
         obj.save(**kwargs)
 
@@ -633,7 +647,7 @@ class ConceptContainerModel(VersionedModel):
             self.concepts.set(concepts)
             if index:
                 from core.concepts.documents import ConceptDocument
-                ConceptDocument().update(self.concepts.all(), parallel=True)
+                self.batch_index(self.concepts, ConceptDocument)
 
     def seed_mappings(self, index=True):
         head = self.head
@@ -647,14 +661,25 @@ class ConceptContainerModel(VersionedModel):
             self.mappings.set(mappings)
             if index:
                 from core.mappings.documents import MappingDocument
-                MappingDocument().update(self.mappings.all(), parallel=True)
+                self.batch_index(self.mappings, MappingDocument)
+
+    @staticmethod
+    def batch_index(queryset, document):
+        count = queryset.count()
+        batch_size = 1000
+        offset = 0
+        limit = batch_size
+        while offset < count:
+            document().update(queryset.all()[offset:limit], parallel=True)
+            offset = limit
+            limit += batch_size
 
     def index_children(self):
         from core.concepts.documents import ConceptDocument
-        ConceptDocument().update(self.concepts.all(), parallel=True)
-
         from core.mappings.documents import MappingDocument
-        MappingDocument().update(self.mappings.all(), parallel=True)
+
+        self.batch_index(self.concepts, ConceptDocument)
+        self.batch_index(self.mappings, MappingDocument)
 
     def add_processing(self, process_id):
         if self.id:
@@ -669,25 +694,42 @@ class ConceptContainerModel(VersionedModel):
             self._background_process_ids.append(process_id)
 
     def remove_processing(self, process_id):
-        if self.id and process_id:
+        if self.id and self._background_process_ids and process_id in self._background_process_ids:
             self._background_process_ids.remove(process_id)
             self.save(update_fields=['_background_process_ids'])
 
     @property
     def is_processing(self):
-        background_ids = compact(self._background_process_ids)
+        background_ids = self._background_process_ids
         if background_ids:
             for process_id in background_ids.copy():
-                res = AsyncResult(process_id)
-                if res.successful() or res.failed():
-                    self.remove_processing(process_id)
+                if process_id:
+                    res = AsyncResult(process_id)
+                    if res.successful() or res.failed():
+                        self.remove_processing(process_id)
+                    else:
+                        return True
                 else:
-                    return True
-        return bool(self._background_process_ids)
+                    self.remove_processing(process_id)
+
+        return False
 
     def clear_processing(self):
         self._background_process_ids = list()
         self.save(update_fields=['_background_process_ids'])
+
+    @property
+    def is_exporting(self):
+        is_processing = self.is_processing
+
+        if is_processing:
+            for process_id in self._background_process_ids:
+                res = AsyncResult(process_id)
+                task_name = res.name
+                if task_name and task_name.startswith('core.common.tasks.export_'):
+                    return True
+
+        return False
 
     @property
     def export_path(self):

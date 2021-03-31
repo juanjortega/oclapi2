@@ -101,10 +101,10 @@ def add_references(
     for ref in added_references:
         if ref.concepts:
             for concept in ref.concepts:
-                concept.save()
+                concept.index()
         if ref.mappings:
             for mapping in ref.mappings:
-                mapping.save()
+                mapping.index()
 
     return added_references, errors
 
@@ -270,3 +270,13 @@ def seed_children(self, resource, obj_id, export=True):
                 instance.index_children()
         finally:
             instance.remove_processing(task_id)
+
+
+@app.task
+def import_v1_content(importer_class, file_url):  # pragma: no cover
+    from core.v1_importers.models import V1BaseImporter
+    klass = V1BaseImporter.get_importer_class_from_string(importer_class)
+    if klass:
+        return klass(file_url).run()
+
+    return None

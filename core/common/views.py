@@ -1,17 +1,25 @@
+import base64
+from email.mime.image import MIMEImage
+
+from django.conf import settings
+from django.core.mail import EmailMessage
 from django.http import Http404
 from django.shortcuts import get_object_or_404
+from drf_yasg import openapi
+from drf_yasg.utils import swagger_auto_schema
 from elasticsearch_dsl import Q
 from pydash import get
 from rest_framework import response, generics, status
 from rest_framework.generics import ListAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from core.common.constants import SEARCH_PARAM, LIST_DEFAULT_LIMIT, CSV_DEFAULT_LIMIT, \
     LIMIT_PARAM, NOT_FOUND, MUST_SPECIFY_EXTRA_PARAM_IN_BODY, INCLUDE_RETIRED_PARAM, VERBOSE_PARAM, HEAD
 from core.common.mixins import PathWalkerMixin
 from core.common.serializers import RootSerializer
-from core.common.utils import compact_dict_by_values, to_snake_case, to_camel_case
+from core.common.utils import compact_dict_by_values, to_snake_case, to_camel_case, parse_updated_since_param
 from core.concepts.permissions import CanViewParentDictionary, CanEditParentDictionary
 from core.orgs.constants import ORG_OBJECT_TYPE
 from core.users.constants import USER_OBJECT_TYPE
@@ -46,11 +54,7 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         return not include_retired
 
     def _should_include_private(self):
-        from core.users.documents import UserProfileDocument
-        if self.document_model in [UserProfileDocument]:
-            return True
-
-        return self.request.user.is_staff
+        return self.is_user_document() or self.request.user.is_staff
 
     def is_verbose(self):
         return self.request.query_params.get(VERBOSE_PARAM, False) in ['true', True]
@@ -266,25 +270,37 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
     def get_extras_searchable_fields_from_query_params(self):
         query_params = self.request.query_params.dict()
 
-        return {
-            k: v for k, v in query_params.items() if k.startswith(
-                'extras.') and not k.startswith('extras.exists') and not k.startswith('extras.exact')
-        }
+        result = {}
+
+        for key, value in query_params.items():
+            if key.startswith('extras.') and not key.startswith('extras.exists') and not key.startswith('extras.exact'):
+                parts = key.split('extras.')
+                result['extras.' + parts[1].replace('.', '__')] = value
+
+        return result
 
     def get_extras_exact_fields_from_query_params(self):
         query_params = self.request.query_params.dict()
+        result = {}
+        for key, value in query_params.items():
+            if key.startswith('extras.exact'):
+                new_key = key.replace('.exact', '')
+                parts = new_key.split('extras.')
+                result['extras.' + parts[1].replace('.', '__')] = value
 
-        return {
-            k.replace('.exact', ''): v for k, v in query_params.items() if k.startswith('extras.exact')
-        }
+        return result
 
     def get_extras_fields_exists_from_query_params(self):
         extras_exists_fields = self.request.query_params.dict().get('extras.exists', None)
 
         if extras_exists_fields:
-            return extras_exists_fields.split(',')
+            return [field.replace('.', '__') for field in extras_exists_fields.split(',')]
 
         return []
+
+    def is_user_document(self):
+        from core.users.documents import UserProfileDocument
+        return self.document_model == UserProfileDocument
 
     def is_owner_document_model(self):
         from core.orgs.documents import OrganizationDocument
@@ -301,8 +317,22 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         from core.sources.documents import SourceDocument
         return self.document_model in [SourceDocument, CollectionDocument]
 
+    def get_public_criteria(self):
+        criteria = Q('match', public_can_view=True)
+        user = self.request.user
+
+        if user.is_authenticated:
+            username = user.username
+            from core.orgs.documents import OrganizationDocument
+            if self.document_model in [OrganizationDocument]:
+                criteria |= (Q('match', public_can_view=False) & Q('match', user=username))
+            if self.is_concept_container_document_model():
+                criteria |= (Q('match', public_can_view=False) & Q('match', created_by=username))
+
+        return criteria
+
     @property
-    def __search_results(self):  # pylint: disable=too-many-branches
+    def __search_results(self):  # pylint: disable=too-many-branches,too-many-locals
         results = None
 
         if self.should_perform_es_search():
@@ -330,6 +360,10 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
                     "query_string", query=self.get_wildcard_search_string(), fields=self.get_searchable_fields()
                 )
 
+            updated_since = parse_updated_since_param(self.request.query_params)
+            if updated_since:
+                results = results.query('range', last_update={"gte": updated_since})
+
             if extras_fields:
                 for field, value in extras_fields.items():
                     results = results.filter(
@@ -342,30 +376,29 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
                     )
             if extras_fields_exact:
                 for field, value in extras_fields_exact.items():
-                    results = results.query("match", **{field: value})
+                    results = results.query("match", **{field: value}, _expand__to_dot=False)
 
             if self._should_exclude_retired_from_search_results():
                 results = results.query('match', retired=False)
 
-            include_private = self._should_include_private()
+            user = self.request.user
+            is_authenticated = user.is_authenticated
+            username = user.username
 
+            include_private = self._should_include_private()
             if not include_private:
-                from core.orgs.documents import OrganizationDocument
-                if self.document_model in [OrganizationDocument] and self.request.user.is_authenticated:
-                    results.query(Q('match', public_can_view=False) & Q('match', user=self.request.user.username))
-                elif self.is_concept_container_document_model() and self.request.user.is_authenticated:
-                    results.query(Q('match', public_can_view=False) & Q('match', created_by=self.request.user.username))
+                results = results.query(self.get_public_criteria())
 
             if self.is_owner_document_model():
                 kwargs_filters = self.kwargs.copy()
-                if self.user_is_self and self.request.user.is_authenticated:
+                if self.user_is_self and is_authenticated:
                     kwargs_filters.pop('user_is_self', None)
-                    kwargs_filters['user'] = self.request.user.username
+                    kwargs_filters['user'] = username
             else:
                 kwargs_filters = self.get_kwargs_filters()
-                if self.user_is_self and self.request.user.is_authenticated:
+                if self.user_is_self and is_authenticated:
                     kwargs_filters['ownerType'] = 'User'
-                    kwargs_filters['owner'] = self.request.user.username
+                    kwargs_filters['owner'] = username
 
             for key, value in kwargs_filters.items():
                 results = results.query('match', **{to_snake_case(key): value})
@@ -529,11 +562,13 @@ class RootView(BaseAPIView):  # pragma: no cover
             if name in ['admin']:
                 continue
             route = str(pattern.pattern)
+            if route in ['v1-importers/']:
+                continue
             if route and name is None:
                 name = route.split('/')[0] + '_urls'
                 if name == 'user_urls':
                     name = 'current_user_urls'
-            data['routes'][name] = self.get_host_url() + '/' + str(pattern.pattern)
+            data['routes'][name] = self.get_host_url() + '/' + route
 
         data['routes'].pop('root')
 
@@ -547,3 +582,62 @@ class BaseLogoView:
         obj.upload_base64_logo(data.get('base64'), 'logo.png')
 
         return Response(self.get_serializer_class()(obj).data, status=status.HTTP_200_OK)
+
+
+class FeedbackView(APIView):  # pragma: no cover
+    permission_classes = (AllowAny, )
+
+    @staticmethod
+    @swagger_auto_schema(request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        properties={
+            'description': openapi.Schema(type=openapi.TYPE_STRING, description='Feedback/Suggestion/Complaint'),
+            'url': openapi.Schema(type=openapi.TYPE_STRING, description='Specific URL to point'),
+        }
+    ))
+    def post(request):
+        message = request.data.get('description', '') or ''
+        url = request.data.get('url', False)
+        name = request.data.get('name', None)
+        email = request.data.get('email', None)
+
+        if not message and not url:
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+        if url:
+            message += '\n\n' + 'URL: ' + url
+
+        user = request.user
+
+        if user.is_authenticated:
+            username = user.username
+            email = user.email
+        else:
+            username = name or 'Guest'
+            email = email or None
+
+        message += '\n\n' + 'Reported By: ' + username
+        subject = "[{env}] [FEEDBACK] From: {user}".format(env=settings.ENV.upper(), user=username)
+
+        mail = EmailMessage(
+            subject=subject,
+            body=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[settings.COMMUNITY_EMAIL],
+            cc=[email] if email else [],
+        )
+
+        image = request.data.get('image', False)
+
+        if image:
+            ext, img_data = image.split(';base64,')
+            extension = ext.split('/')[-1]
+            image_name = 'feedback.' + extension
+
+            img = MIMEImage(base64.b64decode(img_data), extension)
+            img.add_header("Content-Disposition", "inline", filename=image_name)
+            mail.attach(img)
+
+        mail.send()
+
+        return Response(status=status.HTTP_200_OK)

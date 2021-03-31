@@ -1,7 +1,7 @@
 from django_elasticsearch_dsl import Document, fields
 from django_elasticsearch_dsl.registries import registry
 
-from core.common.utils import jsonify_safe
+from core.common.utils import jsonify_safe, flatten_dict
 from core.users.models import UserProfile
 
 
@@ -11,6 +11,7 @@ class UserProfileDocument(Document):
         name = 'user_profiles'
         settings = {'number_of_shards': 1, 'number_of_replicas': 0}
 
+    last_update = fields.DateField(attr='updated_at')
     date_joined = fields.DateField(attr='created_at')
     username = fields.KeywordField(attr='username', normalizer='lowercase')
     location = fields.KeywordField(attr='location', normalizer='lowercase')
@@ -31,6 +32,8 @@ class UserProfileDocument(Document):
 
         if instance.extras:
             value = jsonify_safe(instance.extras)
+            if isinstance(value, dict):
+                value = flatten_dict(value)
 
         return value or {}
 

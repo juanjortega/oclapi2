@@ -524,7 +524,7 @@ class ConceptContainerExportMixin:
             response['Last-Updated-Timezone'] = settings.TIME_ZONE_PLACE
             return response
 
-        if version.is_processing:
+        if version.is_exporting:
             return Response(status=status.HTTP_208_ALREADY_REPORTED)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -536,6 +536,9 @@ class ConceptContainerExportMixin:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
         logger.debug('%s Export requested for version %s (post)', self.entity, version.version)
+
+        if version.is_exporting:
+            return Response(status=status.HTTP_208_ALREADY_REPORTED)
 
         if not version.has_export():
             status_code = self.handle_export_version()
@@ -580,6 +583,12 @@ class ConceptContainerProcessingMixin:
 
     def get(self, request, *args, **kwargs):  # pylint: disable=unused-argument
         version = self.get_object()
+        is_debug = request.query_params.get('debug', None) in ['true', True]
+
+        if is_debug:
+            return Response(dict(is_processing=version.is_processing,
+                                 process_ids=version._background_process_ids))  # pylint: disable=protected-access
+
         logger.debug('Processing flag requested for %s version %s', self.resource, version)
 
         response = Response(status=200)

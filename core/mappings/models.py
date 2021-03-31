@@ -10,7 +10,8 @@ from core.common.mixins import SourceChildMixin
 from core.common.models import VersionedModel
 from core.common.utils import parse_updated_since_param, separate_version, to_parent_uri, generate_temp_version
 from core.mappings.constants import MAPPING_TYPE, MAPPING_IS_ALREADY_RETIRED, MAPPING_WAS_RETIRED, \
-    MAPPING_IS_ALREADY_NOT_RETIRED, MAPPING_WAS_UNRETIRED, PERSIST_CLONE_ERROR, PERSIST_CLONE_SPECIFY_USER_ERROR
+    MAPPING_IS_ALREADY_NOT_RETIRED, MAPPING_WAS_UNRETIRED, PERSIST_CLONE_ERROR, PERSIST_CLONE_SPECIFY_USER_ERROR, \
+    ALREADY_EXISTS
 from core.mappings.mixins import MappingValidationMixin
 
 
@@ -69,6 +70,29 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
     WAS_RETIRED = MAPPING_WAS_RETIRED
     WAS_UNRETIRED = MAPPING_WAS_UNRETIRED
 
+    es_fields = {
+        'id': {'sortable': True, 'filterable': True},
+        'last_update': {'sortable': True, 'filterable': False, 'facet': False, 'default': 'desc'},
+        'concept': {'sortable': False, 'filterable': True, 'facet': False, 'exact': True},
+        'from_concept': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
+        'to_concept': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
+        'retired': {'sortable': False, 'filterable': True, 'facet': True},
+        'map_type': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
+        'source': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
+        'collection': {'sortable': False, 'filterable': True, 'facet': True},
+        'owner': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
+        'owner_type': {'sortable': False, 'filterable': True, 'facet': True},
+        'concept_source': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
+        'from_concept_source': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
+        'to_concept_source': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
+        'concept_owner': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
+        'from_concept_owner': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
+        'to_concept_owner': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
+        'concept_owner_type': {'sortable': False, 'filterable': True, 'facet': True},
+        'from_concept_owner_type': {'sortable': False, 'filterable': True, 'facet': True},
+        'to_concept_owner_type': {'sortable': False, 'filterable': True, 'facet': True},
+    }
+
     @property
     def mapping(self):  # for url kwargs
         return self.mnemonic
@@ -111,17 +135,17 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
 
     def get_to_source(self):
         if self.to_source_id:
-            return self.to_source
+            return get(self, 'to_source')
         if self.to_concept_id:
-            return self.to_concept.parent
+            return get(self, 'to_concept.parent')
 
         return None
 
     def get_from_source(self):
         if self.from_source_id:
-            return self.from_source
+            return get(self, 'from_source')
         if self.from_concept_id:
-            return self.from_concept.parent
+            return get(self, 'from_concept.parent')
 
         return None
 
@@ -263,6 +287,9 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
             models.Q(uri=self.from_source_url) | models.Q(canonical_url=self.from_source_url)
         ).filter(version=HEAD).first()
 
+    def is_existing_in_parent(self):
+        return self.parent.mappings_set.filter(mnemonic__exact=self.mnemonic).exists()
+
     @classmethod
     def create_new_version_for(cls, instance, data, user):
         instance.populate_fields_from_relations(data)
@@ -282,12 +309,15 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         url_params = {k: v for k, v in data.items() if k in related_fields}
 
         mapping = Mapping(**field_data, created_by=user, updated_by=user)
-        mapping.populate_fields_from_relations(url_params)
 
         temp_version = generate_temp_version()
         mapping.mnemonic = data.get('mnemonic', temp_version)
         mapping.version = temp_version
         mapping.errors = dict()
+        if mapping.is_existing_in_parent():
+            mapping.errors = dict(__all__=[ALREADY_EXISTS])
+            return mapping
+        mapping.populate_fields_from_relations(url_params)
 
         try:
             mapping.full_clean()
@@ -345,7 +375,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         parent = obj.parent
         parent_head = parent.head
         persisted = False
-        latest_version = None
+        prev_latest_version = None
         try:
             with transaction.atomic():
                 cls.pause_indexing()
@@ -357,19 +387,20 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
                     obj.save()
                     obj.update_versioned_object()
                     versioned_object = obj.versioned_object
-                    latest_version = versioned_object.versions.exclude(id=obj.id).filter(is_latest_version=True).first()
-                    if latest_version:
-                        latest_version.is_latest_version = False
-                        latest_version.save()
+                    prev_latest_version = versioned_object.versions.exclude(id=obj.id).filter(
+                        is_latest_version=True).first()
+                    if prev_latest_version:
+                        prev_latest_version.is_latest_version = False
+                        prev_latest_version.save()
 
                     obj.sources.set(compact([parent, parent_head]))
                     persisted = True
                     cls.resume_indexing()
 
                     def index_all():
-                        if latest_version:
-                            latest_version.save()
-                        obj.save()
+                        if prev_latest_version:
+                            prev_latest_version.index()
+                        obj.index()
 
                     transaction.on_commit(index_all)
         except ValidationError as err:
@@ -379,9 +410,9 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
             if not persisted:
                 if obj.id:
                     obj.sources.remove(parent_head)
-                    if latest_version:
-                        latest_version.is_latest_version = True
-                        latest_version.save()
+                    if prev_latest_version:
+                        prev_latest_version.is_latest_version = True
+                        prev_latest_version.save()
                     obj.delete()
                 errors['non_field_errors'] = [PERSIST_CLONE_ERROR]
 
@@ -420,7 +451,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
                 queryset = queryset.filter(cls.get_iexact_or_criteria('sources__version', container_version))
 
         if mapping:
-            queryset = queryset.filter(mnemonic__iexact=mapping)
+            queryset = queryset.filter(mnemonic__exact=mapping)
         if mapping_version:
             queryset = queryset.filter(cls.get_iexact_or_criteria('version', mapping_version))
         if is_latest:

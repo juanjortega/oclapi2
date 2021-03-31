@@ -121,17 +121,7 @@ class CollectionVersionBaseView(CollectionBaseView):
 class CollectionListView(CollectionBaseView, ConceptDictionaryCreateMixin, ListWithHeadersMixin):
     serializer_class = CollectionListSerializer
     is_searchable = True
-    es_fields = {
-        'collection_type': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
-        'mnemonic': {'sortable': True, 'filterable': True, 'exact': True},
-        'name': {'sortable': True, 'filterable': True, 'exact': True},
-        'last_update': {'sortable': True, 'filterable': False, 'default': 'desc'},
-        'locale': {'sortable': False, 'filterable': True, 'facet': True},
-        'owner': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
-        'owner_type': {'sortable': False, 'filterable': True, 'facet': True},
-        'custom_validation_schema': {'sortable': False, 'filterable': True},
-        'canonical_url': {'sortable': True, 'filterable': True},
-    }
+    es_fields = Collection.es_fields
     document_model = CollectionDocument
     facet_class = CollectionSearch
     default_filters = dict(is_active=True, version=HEAD)
@@ -307,10 +297,10 @@ class CollectionReferencesView(
         for ref in added_references:
             if ref.concepts:
                 for concept in ref.concepts:
-                    concept.save()
+                    concept.index()
             if ref.mappings:
                 for mapping in ref.mappings:
-                    mapping.save()
+                    mapping.index()
 
         return Response(response, status=status.HTTP_200_OK)
 

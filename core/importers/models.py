@@ -197,6 +197,8 @@ class SourceImporter(BaseResourceImporter):
     allowed_fields = [
         "id", "short_code", "name", "full_name", "description", "source_type", "custom_validation_schema",
         "public_access", "default_locale", "supported_locales", "website", "extras", "external_id",
+        'canonical_url', 'identifier', 'contact', 'jurisdiction', 'publisher', 'purpose', 'copyright',
+        'revision_date', 'text', 'content_type',
     ]
 
     def exists(self):
@@ -272,6 +274,8 @@ class CollectionImporter(BaseResourceImporter):
     allowed_fields = [
         "id", "short_code", "name", "full_name", "description", "collection_type", "custom_validation_schema",
         "public_access", "default_locale", "supported_locales", "website", "extras", "external_id",
+        'canonical_url', 'identifier', 'contact', 'jurisdiction', 'publisher', 'purpose', 'copyright',
+        'revision_date', 'text', 'immutable',
     ]
 
     def exists(self):
@@ -492,10 +496,10 @@ class ReferenceImporter(BaseResourceImporter):
             for ref in added_references:
                 if ref.concepts:
                     for concept in ref.concepts:
-                        concept.save()
+                        concept.index()
                 if ref.mappings:
                     for mapping in ref.mappings:
-                        mapping.save()
+                        mapping.index()
 
             return CREATED
         return FAILED
@@ -783,7 +787,7 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
             if part_list:
                 part_type = get(part_list, '0.type', '').lower()
                 if part_type:
-                    is_child = part_type in ['concept', 'mapping']
+                    is_child = part_type in ['concept', 'mapping', 'reference']
                     start_time = time.time()
                     self.queue_tasks(part_list, is_child)
                     self.wait_till_tasks_alive()

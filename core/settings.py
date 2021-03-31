@@ -79,6 +79,7 @@ INSTALLED_APPS = [
     'core.importers',
     'core.pins',
     'core.client_configs',
+    'core.v1_importers'
 ]
 
 REST_FRAMEWORK = {
@@ -300,6 +301,7 @@ CELERY_TASK_ROUTES = {
     'core.common.tasks.rebuild_indexes': {'queue': 'indexing'}
 }
 CELERY_RESULT_BACKEND = 'redis://%s:%s/%s' % (REDIS_HOST, REDIS_PORT, REDIS_DB)
+CELERY_RESULT_EXTENDED = True
 CELERY_RESULT_BACKEND_TRANSPORT_OPTIONS = {
     'retry_policy': {
         'timeout': 10.0
@@ -339,6 +341,7 @@ EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', True) in ['true', True]
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'no-reply@openconceptlab.org')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 EMAIL_PORT = os.environ.get('EMAIL_PORT', 587)
+COMMUNITY_EMAIL = 'community@openconceptlab.org'
 DEFAULT_FROM_EMAIL = 'openconceptlab <noreply@openconceptlab.org>'
 ACCOUNT_EMAIL_SUBJECT_PREFIX = '[openconceptlab.org] '
 ADMINS = (
