@@ -391,8 +391,8 @@ class CollectionVersionListView(CollectionVersionBaseView, mixins.CreateModelMix
     default_qs_sort_attr = '-created_at'
 
     def get_serializer_class(self):
-        if self.request.method in ['GET', 'HEAD']:
-            return CollectionVersionDetailSerializer if self.is_verbose() else CollectionListSerializer
+        if self.request.method in ['GET', 'HEAD'] and self.is_verbose():
+            return CollectionVersionDetailSerializer
         if self.request.method == 'POST':
             return CollectionCreateSerializer
 
@@ -442,15 +442,16 @@ class CollectionLatestVersionRetrieveUpdateView(CollectionVersionBaseView, Retri
     serializer_class = CollectionVersionDetailSerializer
     permission_classes = (CanViewConceptDictionaryVersion,)
 
-    def get_filter_params(self, default_version_to_head=False):
-        params = super().get_filter_params(default_version_to_head)
-        params['is_latest'] = True
-        return params
-
     def get_object(self, queryset=None):
-        obj = get_object_or_404(self.get_queryset(), released=True)
+        obj = self.get_queryset().first()
+        if not obj:
+            raise Http404
         self.check_object_permissions(self.request, obj)
         return obj
+
+    def get_queryset(self):
+        queryset = super().get_queryset().filter(released=True)
+        return queryset.order_by('-created_at')
 
     def update(self, request, *args, **kwargs):
         self.object = self.get_object()
@@ -599,15 +600,16 @@ class CollectionLatestVersionSummaryView(CollectionVersionBaseView, RetrieveAPIV
     serializer_class = CollectionVersionSummaryDetailSerializer
     permission_classes = (CanViewConceptDictionary,)
 
-    def get_filter_params(self, default_version_to_head=False):
-        params = super().get_filter_params(default_version_to_head)
-        params['is_latest'] = True
-        return params
-
     def get_object(self, queryset=None):
-        obj = get_object_or_404(self.get_queryset(), released=True)
+        obj = self.get_queryset().first()
+        if not obj:
+            raise Http404
         self.check_object_permissions(self.request, obj)
         return obj
+
+    def get_queryset(self):
+        queryset = super().get_queryset().filter(released=True)
+        return queryset.order_by('-created_at')
 
 
 class CollectionClientConfigsView(ResourceClientConfigsView):

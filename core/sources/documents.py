@@ -28,15 +28,20 @@ class SourceDocument(Document):
     jurisdiction = fields.ObjectField()
     publisher = fields.KeywordField(attr='publisher', normalizer='lowercase')
     content_type = fields.KeywordField(attr='content_type', normalizer='lowercase')
+    custom_validation_schema = fields.KeywordField(attr='custom_validation_schema', normalizer='lowercase')
+    hierarchy_meaning = fields.KeywordField(attr='hierarchy_meaning', normalizer='lowercase')
     created_by = fields.KeywordField()
 
     class Django:
         model = Source
         fields = [
             'full_name',
-            'custom_validation_schema',
             'revision_date',
             'retired',
+            'experimental',
+            'case_sensitive',
+            'compositional',
+            'version_needed',
         ]
 
     @staticmethod

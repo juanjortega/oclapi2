@@ -8,7 +8,7 @@ from core.collections.models import CollectionReference, Collection
 from core.collections.utils import is_concept
 from core.common.constants import HEAD
 from core.common.tasks import populate_indexes
-from core.common.utils import generate_temp_version
+from core.common.utils import generate_temp_version, drop_version
 from core.concepts.documents import ConceptDocument
 from core.concepts.models import Concept, LocalizedText
 from core.mappings.documents import MappingDocument
@@ -27,6 +27,7 @@ class V1BaseImporter:
     existed = []
     failed = []
     not_found = []
+    not_found_references = []
 
     elapsed_seconds = 0
     start_time = None
@@ -41,7 +42,7 @@ class V1BaseImporter:
     concepts = dict()
     mappings = dict()
 
-    def __init__(self, file_url):
+    def __init__(self, file_url, **kwargs):  # pylint: disable=unused-argument
         self.file_url = file_url
         self.lines = []
         self.read_file()
@@ -197,6 +198,10 @@ class V1BaseImporter:
             return V1MappingImporter
         if name in ['mapping_version', 'mapping_versions']:
             return V1MappingVersionImporter
+        if name in ['web_user_credential']:
+            return V1WebUserCredentialsImporter
+        if name in ['collection_reference']:
+            return V1CollectionReferencesImporter
 
         return None
 
@@ -290,7 +295,8 @@ class V1UserImporter(V1BaseImporter):
                 else:
                     self.failed.append(original_data)
             except Exception as ex:
-                self.failed.append({**original_data, 'errors': ex.args})
+                args = get(ex, 'message_dict') or str(ex)
+                self.failed.append({**original_data, 'errors': args})
 
     def after_run(self):
         populate_indexes.delay(['users', 'orgs'])
@@ -449,8 +455,9 @@ class V1ConceptImporter(V1BaseImporter):
                 self.created.append(original_data)
             except Exception as ex:
                 self.log("Failed: {}".format(data['uri']))
-                self.log(ex.args)
-                self.failed.append({**original_data, 'errors': ex.args})
+                args = get(ex, 'message_dict') or str(ex)
+                self.log(args)
+                self.failed.append({**original_data, 'errors': args})
 
 
 class V1ConceptVersionImporter(V1BaseImporter):
@@ -520,8 +527,9 @@ class V1ConceptVersionImporter(V1BaseImporter):
                 self.created.append(original_data)
             except Exception as ex:
                 self.log("Failed: {}".format(data['uri']))
-                self.log(ex.args)
-                self.failed.append({**original_data, 'errors': ex.args})
+                args = get(ex, 'message_dict') or str(ex)
+                self.log(args)
+                self.failed.append({**original_data, 'errors': args})
 
 
 class V1MappingImporter(V1BaseImporter):
@@ -551,6 +559,7 @@ class V1MappingImporter(V1BaseImporter):
             to_concept = self.get_concept(to_concept_id)
             if to_concept:
                 data['to_concept'] = to_concept
+                data['to_concept_code'] = get(data, 'to_concept_code') or to_concept.mnemonic
                 data['to_source'] = to_concept.parent
         elif to_source_id:
             to_source = self.get_source(to_source_id)
@@ -587,8 +596,10 @@ class V1MappingImporter(V1BaseImporter):
                 self.created.append(original_data)
             except Exception as ex:
                 self.log("Failed: {}".format(data['uri']))
-                self.log(ex.args)
-                self.failed.append({**original_data, 'errors': ex.args})
+                args = get(ex, 'message_dict') or str(ex)
+                self.log(args)
+                self.log(str(data))
+                self.failed.append({**original_data, 'errors': args})
 
 
 class V1MappingVersionImporter(V1BaseImporter):
@@ -676,8 +687,9 @@ class V1MappingVersionImporter(V1BaseImporter):
                 self.created.append(original_data)
             except Exception as ex:
                 self.log("Failed: {}".format(data['uri']))
-                self.log(ex.args)
-                self.failed.append({**original_data, 'errors': ex.args})
+                args = get(ex, 'message_dict') or str(ex)
+                self.log(args)
+                self.failed.append({**original_data, 'errors': args})
 
 
 class V1CollectionImporter(V1BaseImporter):
@@ -717,7 +729,7 @@ class V1CollectionImporter(V1BaseImporter):
         data['created_at'] = get(created_at, '$date')
         data['updated_at'] = get(updated_at, '$date')
         mnemonic = data.get('mnemonic')
-        data['organization'] = self.get_org(parent_id)
+        data['organization'] = self.get_org(internal_reference_id=parent_id)
 
         self.log("Processing: {} ({}/{})".format(mnemonic, self.processed, self.total))
         uri = data['uri']
@@ -849,6 +861,111 @@ class V1CollectionVersionImporter(V1BaseImporter):
             collection.mappings.set(mappings)
             collection.batch_index(collection.concepts, ConceptDocument)
             collection.batch_index(collection.mappings, MappingDocument)
+
+
+class V1CollectionReferencesImporter(V1BaseImporter):
+    start_message = 'STARTING COLLECTION REFERENCES IMPORTER'
+    result_attrs = ['created', 'not_found', 'existed', 'not_found_references']
+
+    def __init__(self, file_url, **kwargs):
+        self.data = dict()
+        self.drop_version_if_version_missing = kwargs.get('drop_version_if_version_missing', False)
+        super().__init__(file_url)
+
+    def read_file(self):
+        if self.file_url:
+            print("***", self.file_url)
+            file = urllib.request.urlopen(self.file_url)
+
+            self.data = json.loads(file.read())
+            self.total = len(self.data.keys())
+
+    def run(self):
+        self.start_time = time.time()
+        if not isinstance(self.lines, list):
+            return None
+
+        self.log(self.start_message)
+        self.log('TOTAL: {}'.format(self.total))
+
+        for collection_uri, expressions in self.data.items():
+            self.process(collection_uri, expressions)
+
+        self.elapsed_seconds = time.time() - self.start_time
+
+        return self.total_result
+
+    def process(self, collection_uri, expressions):
+        self.processed += 1
+        self.log("Processing: {} ({}/{})".format(collection_uri, self.processed, self.total))
+
+        collection = Collection.objects.filter(uri=collection_uri).first()
+        saved_references = []
+        concepts = []
+        mappings = []
+
+        if collection:
+            for expression in expressions:
+                self.log("Processing Expression: {} ".format(expression))
+                __is_concept = is_concept(expression)
+                if __is_concept:
+                    model = Concept
+                    _instances = concepts
+                else:
+                    model = Mapping
+                    _instances = mappings
+
+                instance = model.objects.filter(uri=expression).first()
+                if self.drop_version_if_version_missing and not instance:
+                    instance = model.objects.filter(uri=drop_version(expression)).first()
+                if not instance:
+                    self.not_found_references.append(expression)
+                    continue
+
+                latest_version = instance.get_latest_version()
+                if not latest_version:
+                    latest_version = model.create_initial_version(instance)
+                    if __is_concept:
+                        latest_version.cloned_names = [name.clone() for name in instance.names.all()]
+                        latest_version.cloned_descriptions = [desc.clone() for desc in instance.descriptions.all()]
+                        latest_version.set_locales()
+                    parent = instance.parent
+                    latest_version.sources.set([parent, parent.head])
+                reference = CollectionReference(expression=latest_version.uri)
+                reference.save()
+                saved_references.append(reference)
+                _instances.append(latest_version)
+                self.created.append(expression)
+            collection.references.add(*saved_references)
+            if concepts:
+                collection.concepts.add(*concepts)
+                collection.batch_index(collection.concepts, ConceptDocument)
+            if mappings:
+                collection.mappings.add(*mappings)
+                collection.batch_index(collection.mappings, MappingDocument)
+
+        else:
+            self.not_found.append(collection_uri)
+
+
+class V1WebUserCredentialsImporter(V1BaseImporter):
+    start_message = 'STARTING WEB USER CREDENTIALS IMPORT'
+    result_attrs = ['updated', 'not_found']
+
+    def process_line(self, line):
+        self.processed += 1
+        data = json.loads(line)
+        original_data = data.copy()
+        username = data.get('username')
+        password = data.get('password')
+        self.log("Processing: {} ({}/{})".format(username, self.processed, self.total))
+        user = UserProfile.objects.filter(username=username).first()
+        if user:
+            user.password = password
+            user.save()
+            self.updated.append(original_data)
+        else:
+            self.not_found.append(original_data)
 
 
 class V1IdsImporter(V1BaseImporter):

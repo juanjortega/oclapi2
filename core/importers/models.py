@@ -198,7 +198,8 @@ class SourceImporter(BaseResourceImporter):
         "id", "short_code", "name", "full_name", "description", "source_type", "custom_validation_schema",
         "public_access", "default_locale", "supported_locales", "website", "extras", "external_id",
         'canonical_url', 'identifier', 'contact', 'jurisdiction', 'publisher', 'purpose', 'copyright',
-        'revision_date', 'text', 'content_type',
+        'revision_date', 'text', 'content_type', 'experimental', 'case_sensitive', 'collection_reference',
+        'hierarchy_meaning', 'compositional', 'version_needed'
     ]
 
     def exists(self):
@@ -275,7 +276,7 @@ class CollectionImporter(BaseResourceImporter):
         "id", "short_code", "name", "full_name", "description", "collection_type", "custom_validation_schema",
         "public_access", "default_locale", "supported_locales", "website", "extras", "external_id",
         'canonical_url', 'identifier', 'contact', 'jurisdiction', 'publisher', 'purpose', 'copyright',
-        'revision_date', 'text', 'immutable',
+        'revision_date', 'text', 'immutable', 'experimental', 'locked_date'
     ]
 
     def exists(self):
@@ -854,15 +855,8 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
         )
 
     def queue_tasks(self, part_list, is_child):
-        if is_child:
-            chunked_lists = self.chunker_list(part_list, self.parallel)
-        else:
-            chunked_lists = [part_list]
-
-        chunked_lists = compact(chunked_lists)
-
-        queue = 'concurrent'
+        chunked_lists = compact(self.chunker_list(part_list, self.parallel) if is_child else [part_list])
         jobs = group(bulk_import_parts_inline.s(_list, self.username, self.update_if_exists) for _list in chunked_lists)
-        group_result = jobs.apply_async(queue=queue)
+        group_result = jobs.apply_async(queue='concurrent')
         self.groups.append(group_result)
         self.tasks += group_result.results

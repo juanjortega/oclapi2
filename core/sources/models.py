@@ -19,7 +19,7 @@ class Source(ConceptContainerModel):
         'locale': {'sortable': False, 'filterable': True, 'facet': True},
         'owner': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
         'owner_type': {'sortable': False, 'filterable': True, 'facet': True},
-        'custom_validation_schema': {'sortable': False, 'filterable': True},
+        'custom_validation_schema': {'sortable': False, 'filterable': True, 'facet': True},
         'canonical_url': {'sortable': True, 'filterable': True},
     }
 
@@ -40,6 +40,11 @@ class Source(ConceptContainerModel):
 
     source_type = models.TextField(blank=True, null=True)
     content_type = models.TextField(blank=True, null=True)
+    collection_reference = models.CharField(null=True, blank=True, max_length=100)
+    hierarchy_meaning = models.CharField(null=True, blank=True, max_length=50)
+    case_sensitive = models.BooleanField(null=True, blank=True, default=None)
+    compositional = models.BooleanField(null=True, blank=True, default=None)
+    version_needed = models.BooleanField(null=True, blank=True, default=None)
 
     OBJECT_TYPE = SOURCE_TYPE
     OBJECT_VERSION_TYPE = SOURCE_VERSION_TYPE

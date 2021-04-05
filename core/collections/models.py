@@ -35,7 +35,7 @@ class Collection(ConceptContainerModel):
         'locale': {'sortable': False, 'filterable': True, 'facet': True},
         'owner': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
         'owner_type': {'sortable': False, 'filterable': True, 'facet': True},
-        'custom_validation_schema': {'sortable': False, 'filterable': True},
+        'custom_validation_schema': {'sortable': False, 'filterable': True, 'facet': True},
         'canonical_url': {'sortable': True, 'filterable': True},
     }
 
@@ -62,6 +62,7 @@ class Collection(ConceptContainerModel):
     mappings = models.ManyToManyField('mappings.Mapping', blank=True, related_name='collection_set')
     references = models.ManyToManyField('collections.CollectionReference', blank=True, related_name='collections')
     immutable = models.BooleanField(default=False)
+    locked_date = models.DateTimeField(null=True, blank=True)
 
     @classmethod
     def get_base_queryset(cls, params):
