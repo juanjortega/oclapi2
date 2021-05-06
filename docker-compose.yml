@@ -54,6 +54,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
   celery_indexing:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
@@ -64,6 +65,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
   celery_concurrent:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
@@ -74,6 +76,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
   celery_bulk_import_0_1:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
@@ -84,6 +87,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
   celery_bulk_import_2_3:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
@@ -94,16 +98,18 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
   celery_bulk_import_root:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
-    command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_root ./start_celery_worker.sh -Q bulk_import_root -c 1"]
+    command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_root ./start_celery_worker.sh -Q bulk_import_root -c 2"]
     restart: "always"
     healthcheck:
       test:  ["CMD-SHELL", "-c", "CELERY_WORKER_NAME=bulk_import_root ./ping_celery_worker.sh"]
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
   flower:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
