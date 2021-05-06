@@ -1,14 +1,18 @@
 import json
 import time
 import urllib
+from datetime import datetime
 
+import requests
+from django.conf import settings
+from django.db.models import Q
 from pydash import get
 
 from core.collections.models import CollectionReference, Collection
 from core.collections.utils import is_concept
 from core.common.constants import HEAD
 from core.common.tasks import populate_indexes
-from core.common.utils import generate_temp_version, drop_version
+from core.common.utils import generate_temp_version, drop_version, to_parent_uri
 from core.concepts.documents import ConceptDocument
 from core.concepts.models import Concept, LocalizedText
 from core.mappings.documents import MappingDocument
@@ -28,6 +32,8 @@ class V1BaseImporter:
     failed = []
     not_found = []
     not_found_references = []
+    old_users = []
+    not_found_matching_mapping = []
 
     elapsed_seconds = 0
     start_time = None
@@ -59,6 +65,20 @@ class V1BaseImporter:
         print("*******{}*******".format(msg))
 
     @property
+    def v1_api_base_url(self):
+        v1_api_base_url = None
+        if settings.ENV == 'production':
+            v1_api_base_url = 'https://api.v1.openconceptlab.org'
+        if settings.ENV == 'staging':
+            v1_api_base_url = 'https://api.staging.v1.openconceptlab.org'
+        if settings.ENV == 'qa':
+            v1_api_base_url = 'https://api.qa.v1.openconceptlab.org'
+        if settings.ENV == 'demo':
+            v1_api_base_url = 'https://api.demo.v1.openconceptlab.org'
+
+        return v1_api_base_url
+
+    @property
     def common_result(self):
         return dict(
             total=self.total, processed=self.processed, start_time=self.start_time,
@@ -88,31 +108,55 @@ class V1BaseImporter:
         result_details = self.details
         return dict(report=result_details, json=result_details, detailed_summary=self.summary)
 
-    def get_user(self, username):
-        if username not in self.users:
-            user = UserProfile.objects.filter(username=username).first()
-            self.users[username] = user
-
-        return self.users[username]
-
-    def get_org(self, mnemonic=None, internal_reference_id=None):
+    def get_user(self, username=None, internal_reference_id=None, uri=None):
         filters = dict()
-        key = mnemonic or internal_reference_id
+        key = username or internal_reference_id or uri
+        if not key:
+            return None
+
+        if username:
+            filters['username'] = key
+        elif internal_reference_id:
+            filters['internal_reference_id'] = key
+        else:
+            filters['uri'] = key
+
+        if key not in self.users:
+            user = UserProfile.objects.filter(**filters).first()
+            if user:
+                _internal_reference_id = user.internal_reference_id
+                _username = user.username
+                _uri = user.uri
+                self.users[_username] = user
+                self.users[_internal_reference_id] = user
+                self.users[_uri] = user
+            else:
+                self.users[key] = user
+
+        return self.users[key]
+
+    def get_org(self, mnemonic=None, internal_reference_id=None, uri=None):
+        filters = dict()
+        key = mnemonic or internal_reference_id or uri
         if not key:
             return None
 
         if mnemonic:
             filters['mnemonic'] = key
-        else:
+        elif internal_reference_id:
             filters['internal_reference_id'] = key
+        else:
+            filters['uri'] = key
 
         if key not in self.orgs:
             org = Organization.objects.filter(**filters).first()
             if org:
                 _internal_reference_id = org.internal_reference_id
                 _mnemonic = org.mnemonic
+                _uri = org.uri
                 self.orgs[_mnemonic] = org
                 self.orgs[_internal_reference_id] = org
+                self.orgs[_uri] = org
             else:
                 self.orgs[key] = org
 
@@ -200,8 +244,12 @@ class V1BaseImporter:
             return V1MappingVersionImporter
         if name in ['web_user_credential']:
             return V1WebUserCredentialsImporter
+        if name in ['tokens']:
+            return V1UserTokensImporter
         if name in ['collection_reference']:
             return V1CollectionReferencesImporter
+        if name in ['mapping_reference']:
+            return V1CollectionMappingReferencesImporter
 
         return None
 
@@ -311,14 +359,16 @@ class V1SourceImporter(V1BaseImporter):
         original_data = data.copy()
         self.processed += 1
         _id = data.pop('_id')
+        data.pop('parent_id')
         data.pop('parent_type_id')
-        parent_id = data.pop('parent_id')
+        uri = data['uri']
+        owner_uri = uri.split('/sources/')[0] + '/'
         created_at = data.pop('created_at')
         updated_at = data.pop('updated_at')
         created_by = data.get('created_by')
         updated_by = data.get('updated_by')
-        creator = self.get_user(created_by)
-        updater = self.get_user(updated_by)
+        creator = self.get_user(username=created_by)
+        updater = self.get_user(username=updated_by)
 
         if creator:
             data['created_by'] = creator
@@ -329,10 +379,12 @@ class V1SourceImporter(V1BaseImporter):
         data['updated_at'] = get(updated_at, '$date')
         mnemonic = data.get('mnemonic')
 
-        uri = data['uri']
         if '/orgs/' in uri:
-            org = self.get_org(internal_reference_id=parent_id)
+            org = self.get_org(uri=owner_uri)
             data['organization'] = org
+        else:
+            user = self.get_user(uri=owner_uri)
+            data['user'] = user
 
         self.log("Processing: {} ({}/{})".format(mnemonic, self.processed, self.total))
         if Source.objects.filter(uri=uri).exists():
@@ -373,8 +425,8 @@ class V1SourceVersionImporter(V1BaseImporter):
         updated_at = data.pop('updated_at')
         created_by = data.get('created_by')
         updated_by = data.get('updated_by')
-        creator = self.get_user(created_by)
-        updater = self.get_user(updated_by)
+        creator = self.get_user(username=created_by)
+        updater = self.get_user(username=updated_by)
 
         if creator:
             data['created_by'] = creator
@@ -421,8 +473,8 @@ class V1ConceptImporter(V1BaseImporter):
         data['internal_reference_id'] = get(_id, '$oid')
         data['created_at'] = get(created_at, '$date')
         data['updated_at'] = get(updated_at, '$date')
-        creator = self.get_user(created_by)
-        updater = self.get_user(updated_by)
+        creator = self.get_user(username=created_by)
+        updater = self.get_user(username=updated_by)
 
         if creator:
             data['created_by'] = creator
@@ -496,8 +548,8 @@ class V1ConceptVersionImporter(V1BaseImporter):
         data['created_at'] = get(created_at, '$date')
         data['updated_at'] = get(updated_at, '$date')
 
-        creator = self.get_user(created_by)
-        updater = self.get_user(updated_by)
+        creator = self.get_user(username=created_by)
+        updater = self.get_user(username=updated_by)
 
         if creator:
             data['created_by'] = creator
@@ -573,8 +625,8 @@ class V1MappingImporter(V1BaseImporter):
         data['created_at'] = get(created_at, '$date')
         data['updated_at'] = get(updated_at, '$date')
 
-        creator = self.get_user(created_by)
-        updater = self.get_user(updated_by)
+        creator = self.get_user(username=created_by)
+        updater = self.get_user(username=updated_by)
 
         if creator:
             data['created_by'] = creator
@@ -646,8 +698,8 @@ class V1MappingVersionImporter(V1BaseImporter):
         if to_source_id:
             to_source = self.get_source(to_source_id)
 
-        creator = self.get_user(created_by)
-        updater = self.get_user(updated_by)
+        creator = self.get_user(username=created_by)
+        updater = self.get_user(username=updated_by)
 
         if creator:
             data['created_by'] = creator
@@ -711,15 +763,17 @@ class V1CollectionImporter(V1BaseImporter):
         for attr in ['parent_type_id', 'concepts', 'mappings']:
             data.pop(attr, None)
 
-        parent_id = data.pop('parent_id')
+        data.pop('parent_id')
+        uri = data['uri']
+        owner_uri = uri.split('/collections/')[0] + '/'
         created_at = data.pop('created_at')
         updated_at = data.pop('updated_at')
         created_by = data.get('created_by')
         updated_by = data.get('updated_by')
         references = data.pop('references') or []
 
-        creator = self.get_user(created_by)
-        updater = self.get_user(updated_by)
+        creator = self.get_user(username=created_by)
+        updater = self.get_user(username=updated_by)
         if creator:
             data['created_by'] = creator
         if updater:
@@ -729,7 +783,12 @@ class V1CollectionImporter(V1BaseImporter):
         data['created_at'] = get(created_at, '$date')
         data['updated_at'] = get(updated_at, '$date')
         mnemonic = data.get('mnemonic')
-        data['organization'] = self.get_org(internal_reference_id=parent_id)
+        if '/orgs/' in uri:
+            org = self.get_org(uri=owner_uri)
+            data['organization'] = org
+        else:
+            user = self.get_user(uri=owner_uri)
+            data['user'] = user
 
         self.log("Processing: {} ({}/{})".format(mnemonic, self.processed, self.total))
         uri = data['uri']
@@ -807,8 +866,8 @@ class V1CollectionVersionImporter(V1BaseImporter):
         updated_at = data.pop('updated_at')
         created_by = data.get('created_by')
         updated_by = data.get('updated_by')
-        creator = self.get_user(created_by)
-        updater = self.get_user(updated_by)
+        creator = self.get_user(username=created_by)
+        updater = self.get_user(username=updated_by)
         if creator:
             data['created_by'] = creator
         if updater:
@@ -861,6 +920,122 @@ class V1CollectionVersionImporter(V1BaseImporter):
             collection.mappings.set(mappings)
             collection.batch_index(collection.concepts, ConceptDocument)
             collection.batch_index(collection.mappings, MappingDocument)
+
+
+class V1CollectionMappingReferencesImporter(V1BaseImporter):
+    start_message = 'STARTING COLLECTION MAPPING REFERENCES IMPORTER'
+    result_attrs = ['created', 'not_found', 'existed', 'not_found_references', 'not_found_matching_mapping', 'failed']
+
+    def __init__(self, file_url, **kwargs):
+        self.data = dict()
+        self.drop_version_if_version_missing = kwargs.get('drop_version_if_version_missing', False)
+        super().__init__(file_url)
+
+    def read_file(self):
+        if self.file_url:
+            print("***", self.file_url)
+            file = urllib.request.urlopen(self.file_url)
+
+            self.data = json.loads(file.read())
+            self.total = len(self.data.keys())
+
+    def run(self):
+        self.start_time = time.time()
+        if not isinstance(self.lines, list):
+            return None
+
+        self.log(self.start_message)
+        self.log('TOTAL: {}'.format(self.total))
+
+        for collection_uri, expressions in self.data.items():
+            self.process(collection_uri, expressions)
+
+        self.elapsed_seconds = time.time() - self.start_time
+
+        return self.total_result
+
+    def process(self, collection_uri, expressions):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+        self.processed += 1
+        self.log("Processing: {} ({}/{})".format(collection_uri, self.processed, self.total))
+
+        collection = Collection.objects.filter(uri=collection_uri).first()
+        saved_references = []
+        mappings = []
+        v1_api_base_url = self.v1_api_base_url
+        self.log("V1 API BASE URL: {}".format(v1_api_base_url))
+
+        if collection:
+            for expression in expressions:
+                self.log("Processing Expression: {} ".format(expression))
+                versionless_expression = drop_version(expression)
+                if collection.references.filter(expression__contains=versionless_expression).exists():
+                    self.log("Existed as reference. Skipping...: {} ".format(expression))
+                    self.existed.append(expression)
+                    continue
+                response = requests.get("{}{}".format(v1_api_base_url, expression))
+                if response.status_code != 200:
+                    self.log("Expression GET failed: {} ".format(expression))
+                    if self.drop_version_if_version_missing:
+                        self.log("Trying Versionless expression...: {} ".format(versionless_expression))
+                        response = requests.get("{}{}".format(v1_api_base_url, versionless_expression))
+                        if response.status_code != 200:
+                            self.log(
+                                "Versionless Expression GET failed. Skipping...: {} ".format(versionless_expression)
+                            )
+                            self.failed.append(expression)
+                            continue
+                    else:
+                        self.log('Skipping...: {}'.format(expression))
+                        self.failed.append(expression)
+                        continue
+
+                self.log("Found Expression: {} ".format(expression))
+                v1_data = response.json()
+
+                map_type = v1_data.get('map_type')
+                from_concept_uri = v1_data.get('from_concept_url')
+                to_concept_uri = v1_data.get('to_concept_url')
+                to_concept_code = v1_data.get('to_concept_code')
+                parent_uri = to_parent_uri(versionless_expression)
+
+                to_concept_criteria = None
+                if to_concept_code:
+                    to_concept_criteria = Q(to_concept_code=to_concept_code)
+                if to_concept_uri:
+                    criteria = Q(to_concept__uri=to_concept_uri)
+                    if not to_concept_criteria:
+                        to_concept_criteria = criteria
+                    else:
+                        to_concept_criteria |= criteria
+
+                mapping = Mapping.objects.filter(
+                    map_type=map_type, parent__uri=parent_uri, from_concept__uri=from_concept_uri
+                ).filter(to_concept_criteria).first()
+                if not mapping:
+                    self.log("Matching mapping not found. Skipping...: {}".format(expression))
+                    self.not_found_matching_mapping.append(expression)
+                    continue
+
+                latest_version = mapping.get_latest_version()
+                if not latest_version:
+                    latest_version = Mapping.create_initial_version(mapping)
+                    parent = mapping.parent
+                    latest_version.sources.set([parent, parent.head])
+                if collection.references.filter(expression__contains=drop_version(latest_version.uri)).exists():
+                    self.log("Existed as matching reference. Skipping...: {} ".format(expression))
+                    self.existed.append(expression)
+                    continue
+                reference = CollectionReference(expression=latest_version.uri)
+                reference.save()
+                saved_references.append(reference)
+                mappings.append(latest_version)
+                self.created.append(expression)
+            collection.references.add(*saved_references)
+            if mappings:
+                collection.mappings.add(*mappings)
+                collection.batch_index(collection.mappings, MappingDocument)
+        else:
+            self.not_found.append(collection_uri)
 
 
 class V1CollectionReferencesImporter(V1BaseImporter):
@@ -931,6 +1106,10 @@ class V1CollectionReferencesImporter(V1BaseImporter):
                         latest_version.set_locales()
                     parent = instance.parent
                     latest_version.sources.set([parent, parent.head])
+                if collection.references.filter(expression__contains=drop_version(latest_version.uri)).exists():
+                    self.log("Existed as matching reference. Skipping...: {} ".format(expression))
+                    self.existed.append(expression)
+                    continue
                 reference = CollectionReference(expression=latest_version.uri)
                 reference.save()
                 saved_references.append(reference)
@@ -948,6 +1127,26 @@ class V1CollectionReferencesImporter(V1BaseImporter):
             self.not_found.append(collection_uri)
 
 
+class V1UserTokensImporter(V1BaseImporter):
+    start_message = 'STARTING TOKEN IMPORT'
+    result_attrs = ['updated', 'not_found', 'old_users']
+
+    def process_line(self, line):
+        self.processed += 1
+        data = json.loads(line)
+        original_data = data.copy()
+        username = data.get('username')
+        token = data.get('token')
+        self.log("Processing: {} ({}/{})".format(username, self.processed, self.total))
+        user = UserProfile.objects.filter(username=username).first()
+        oct_1_2020 = datetime(2020, 10, 1).timestamp()
+        if user and (not user.last_login or user.last_login.timestamp() >= oct_1_2020):
+            user.set_token(token)
+            self.updated.append(original_data)
+        else:
+            self.not_found.append(original_data)
+
+
 class V1WebUserCredentialsImporter(V1BaseImporter):
     start_message = 'STARTING WEB USER CREDENTIALS IMPORT'
     result_attrs = ['updated', 'not_found']
@@ -958,10 +1157,12 @@ class V1WebUserCredentialsImporter(V1BaseImporter):
         original_data = data.copy()
         username = data.get('username')
         password = data.get('password')
+        last_login = data.get('last_login')
         self.log("Processing: {} ({}/{})".format(username, self.processed, self.total))
         user = UserProfile.objects.filter(username=username).first()
         if user:
             user.password = password
+            user.last_login = last_login
             user.save()
             self.updated.append(original_data)
         else:

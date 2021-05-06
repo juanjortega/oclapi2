@@ -140,14 +140,25 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
     def get_exact_search_fields(self):
         return [field for field, config in get(self, 'es_fields', dict()).items() if config.get('exact', False)]
 
-    def get_search_string(self):
-        return self.request.query_params.dict().get(SEARCH_PARAM, '')
+    def get_search_string(self, lower=True):
+        search_str = self.request.query_params.dict().get(SEARCH_PARAM, '').strip()
+        search_str = search_str.replace('-', '_')
+        if lower:
+            search_str = search_str.lower()
+
+        return search_str
 
     def get_wildcard_search_string(self):
         return "*{}*".format(self.get_search_string())
 
     def get_sort_attr(self):
         sort_field, desc = self.get_sort_and_desc()
+        if sort_field and sort_field.lower() in ['score', '_score', 'best match']:
+            return dict(_score=dict(order="desc" if desc else "asc"))
+
+        if self.is_concept_document() and sort_field == 'name':
+            sort_field = '_name'
+
         if self.is_valid_sort(sort_field):
             if desc:
                 sort_field = '-' + sort_field
@@ -156,10 +167,14 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         return dict(_score=dict(order="desc"))
 
     def get_exact_search_criterion(self):
-        search_str = self.get_search_string()
+        search_str = self.get_search_string(False)
 
         def get_query(attr):
-            return Q('match', **{attr: search_str})
+            words = search_str.split(' ')
+            criteria = Q('match', **{attr: words[0]})
+            for word in words[1:]:
+                criteria &= Q('match', **{attr: word})
+            return criteria
 
         exact_search_fields = self.get_exact_search_fields()
         criterion = get_query(exact_search_fields.pop())
@@ -210,16 +225,21 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
     def get_facet_filters_from_kwargs(self):
         kwargs = self.kwargs
         filters = dict()
-        if 'user' in kwargs:
-            filters['ownerType'] = USER_OBJECT_TYPE
-            filters['owner'] = kwargs['user']
-        if 'org' in kwargs:
-            filters['ownerType'] = ORG_OBJECT_TYPE
-            filters['owner'] = kwargs['org']
-        if 'source' in kwargs:
-            filters['source'] = kwargs['source']
-        if 'collection' in kwargs:
+        is_collection_specified = 'collection' in self.kwargs
+        is_user_specified = 'user' in kwargs
+        if is_collection_specified:
             filters['collection'] = kwargs['collection']
+            filters['collection_owner_url'] = '/users/{}/'.format(
+                kwargs['user']) if is_user_specified else '/orgs/{}/'.format(kwargs['org'])
+        else:
+            if is_user_specified:
+                filters['ownerType'] = USER_OBJECT_TYPE
+                filters['owner'] = kwargs['user']
+            if 'org' in kwargs:
+                filters['ownerType'] = ORG_OBJECT_TYPE
+                filters['owner'] = kwargs['org']
+            if 'source' in kwargs:
+                filters['source'] = kwargs['source']
 
         return filters
 
@@ -282,8 +302,9 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
             if not self._should_exclude_retired_from_search_results() or not is_source_child_document_model:
                 filters.pop('retired')
 
+            is_exact_match_on = self.is_exact_match_on()
             facets = self.facet_class(  # pylint: disable=not-callable
-                self.get_search_string(), filters=filters, exact_match=self.is_exact_match_on()
+                self.get_search_string(lower=not is_exact_match_on), filters=filters, exact_match=is_exact_match_on
             ).execute().facets.to_dict()
 
         return facets
@@ -323,6 +344,10 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         from core.users.documents import UserProfileDocument
         return self.document_model == UserProfileDocument
 
+    def is_concept_document(self):
+        from core.concepts.documents import ConceptDocument
+        return self.document_model == ConceptDocument
+
     def is_owner_document_model(self):
         from core.orgs.documents import OrganizationDocument
         from core.users.documents import UserProfileDocument
@@ -352,6 +377,13 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
 
         return criteria
 
+    def __should_query_latest_version(self):
+        kwargs = {**self.get_faceted_filters(), **self.kwargs}
+        collection = kwargs.get('collection', '')
+        version = kwargs.get('version', '')
+
+        return (not collection or collection.startswith('!')) and (not version or version.startswith('!'))
+
     @property
     def __search_results(self):  # pylint: disable=too-many-branches,too-many-locals
         results = None
@@ -359,8 +391,7 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         if self.should_perform_es_search():
             results = self.document_model.search()
             default_filters = self.default_filters.copy()
-            if self.is_source_child_document_model() and 'collection' not in self.kwargs and \
-                    'version' not in self.kwargs:
+            if self.is_source_child_document_model() and self.__should_query_latest_version():
                 default_filters['is_latest_version'] = True
 
             for field, value in default_filters.items():
@@ -377,9 +408,7 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
             if self.is_exact_match_on():
                 results = results.query(self.get_exact_search_criterion())
             else:
-                results = results.filter(
-                    "query_string", query=self.get_wildcard_search_string(), fields=self.get_searchable_fields()
-                )
+                results = results.query(self.get_wildcard_search_criterion())
 
             updated_since = parse_updated_since_param(self.request.query_params)
             if updated_since:
@@ -429,6 +458,21 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
                 results = results.sort(sort_field)
 
         return results
+
+    def get_wildcard_search_criterion(self):
+        search_string = self.get_search_string()
+        wildcard_search_string = self.get_wildcard_search_string()
+        name_attr = 'name'
+        if self.is_concept_document():
+            name_attr = '_name'
+
+        return Q(
+            "wildcard", id=dict(value=search_string, boost=2)
+        ) | Q(
+            "wildcard", **{name_attr: dict(value=search_string, boost=5)}
+        ) | Q(
+            "query_string", query=wildcard_search_string
+        )
 
     def get_search_results_qs(self):
         if not self.should_perform_es_search():
@@ -516,7 +560,7 @@ class SourceChildExtrasBaseView:
     default_qs_sort_attr = '-created_at'
 
     def get_object(self):
-        queryset = self.get_queryset(None)
+        queryset = self.get_queryset()
 
         if 'concept_version' in self.kwargs or 'mapping_version' in self.kwargs:
             return queryset.first()

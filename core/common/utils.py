@@ -4,10 +4,11 @@ import random
 import tempfile
 import uuid
 import zipfile
-from collections import MutableMapping  # pylint: disable=no-name-in-module
+from collections import MutableMapping, OrderedDict  # pylint: disable=no-name-in-module
 from urllib import parse
 
 import requests
+from celery_once.helpers import queue_once_key
 from dateutil import parser
 from django.conf import settings
 from django.urls import NoReverseMatch, reverse, get_resolver, resolve, Resolver404
@@ -224,7 +225,7 @@ def write_export_file(
         for start in range(0, total_concepts, batch_size):
             end = min(start + batch_size, total_concepts)
             logger.info('Serializing concepts %d - %d...' % (start+1, end))
-            concept_versions = concepts_qs.prefetch_related(
+            concept_versions = concepts_qs.order_by('-id').prefetch_related(
                 'names', 'descriptions').select_related('parent__organization', 'parent__user')[start:end]
             concept_serializer = concept_serializer_class(concept_versions, many=True)
             concept_data = concept_serializer.data
@@ -253,7 +254,7 @@ def write_export_file(
             for start in range(0, total_references, batch_size):
                 end = min(start + batch_size, total_references)
                 logger.info('Serializing references %d - %d...' % (start + 1, end))
-                references = references_qs.filter()[start:end]
+                references = references_qs.order_by('-id').filter()[start:end]
                 reference_serializer = reference_serializer_class(references, many=True)
                 reference_string = json.dumps(reference_serializer.data, cls=encoders.JSONEncoder)
                 reference_string = reference_string[1:-1]
@@ -276,7 +277,7 @@ def write_export_file(
         for start in range(0, total_mappings, batch_size):
             end = min(start + batch_size, total_mappings)
             logger.info('Serializing mappings %d - %d...' % (start+1, end))
-            mappings = mappings_qs.select_related(
+            mappings = mappings_qs.order_by('-id').select_related(
                 'parent__organization', 'parent__user', 'from_concept', 'to_concept',
                 'from_source__organization', 'from_source__user',
                 'to_source__organization', 'to_source__user',
@@ -500,9 +501,9 @@ def web_url():
         return 'http://localhost:4000'
 
     if env == 'production':
-        return "https://app.aws.openconceptlab.org"
+        return "https://app.openconceptlab.org"
 
-    return "https://app.{}.aws.openconceptlab.org".format(env)
+    return "https://app.{}.openconceptlab.org".format(env)
 
 
 def get_resource_class_from_resource_name(resource):  # pylint: disable=too-many-return-statements
@@ -557,3 +558,17 @@ def flatten_dict(dikt, parent_key='', sep='__'):
         else:
             items.append((new_key, str(val)))
     return dict(items)
+
+
+def get_bulk_import_celery_once_lock_key(async_result):
+    result_args = async_result.args
+    args = [('to_import', result_args[0]), ('username', result_args[1]), ('update_if_exists', result_args[2])]
+
+    if async_result.name == 'core.common.tasks.bulk_import_parallel_inline':
+        args.append(('threads', result_args[3]))
+
+    return get_celery_once_lock_key(async_result.name, args)
+
+
+def get_celery_once_lock_key(name, args):
+    return queue_once_key(name, OrderedDict(args), None)

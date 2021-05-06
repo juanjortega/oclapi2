@@ -37,6 +37,8 @@ class Collection(ConceptContainerModel):
         'owner_type': {'sortable': False, 'filterable': True, 'facet': True},
         'custom_validation_schema': {'sortable': False, 'filterable': True, 'facet': True},
         'canonical_url': {'sortable': True, 'filterable': True},
+        'experimental': {'sortable': False, 'filterable': True, 'facet': True},
+        'external_id': {'sortable': False, 'filterable': True, 'facet': False, 'exact': False},
     }
 
     class Meta:
@@ -61,7 +63,7 @@ class Collection(ConceptContainerModel):
     concepts = models.ManyToManyField('concepts.Concept', blank=True, related_name='collection_set')
     mappings = models.ManyToManyField('mappings.Mapping', blank=True, related_name='collection_set')
     references = models.ManyToManyField('collections.CollectionReference', blank=True, related_name='collections')
-    immutable = models.BooleanField(default=False)
+    immutable = models.BooleanField(null=True, blank=True, default=None)
     locked_date = models.DateTimeField(null=True, blank=True)
 
     @classmethod

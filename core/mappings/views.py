@@ -5,6 +5,7 @@ from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status
 from rest_framework.generics import DestroyAPIView, UpdateAPIView, RetrieveAPIView
 from rest_framework.mixins import CreateModelMixin
+from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
 from core.common.constants import HEAD
@@ -36,8 +37,8 @@ class MappingBaseView(SourceChildCommonBaseView):
     def get_detail_serializer(obj, data=None, files=None, partial=False):
         return MappingDetailSerializer(obj, data, files, partial)
 
-    def get_queryset(self, distinct_by='updated_at'):  # pylint: disable=arguments-differ
-        return Mapping.get_base_queryset(self.params, distinct_by)
+    def get_queryset(self):
+        return Mapping.get_base_queryset(self.params)
 
 
 class MappingListView(MappingBaseView, ListWithHeadersMixin, CreateModelMixin):
@@ -55,7 +56,7 @@ class MappingListView(MappingBaseView, ListWithHeadersMixin, CreateModelMixin):
 
         return MappingListSerializer
 
-    def get_queryset(self, _=None):
+    def get_queryset(self):
         is_latest_version = 'collection' not in self.kwargs and 'version' not in self.kwargs
         queryset = super().get_queryset()
         if is_latest_version:
@@ -101,7 +102,7 @@ class MappingRetrieveUpdateDestroyView(MappingBaseView, RetrieveAPIView, UpdateA
     serializer_class = MappingDetailSerializer
 
     def get_object(self, queryset=None):
-        queryset = self.get_queryset(None)
+        queryset = self.get_queryset()
         filters = dict(id=F('versioned_object_id'))
         if 'collection' in self.kwargs:
             filters = dict()
@@ -122,6 +123,9 @@ class MappingRetrieveUpdateDestroyView(MappingBaseView, RetrieveAPIView, UpdateA
     def get_permissions(self):
         if self.request.method in ['GET']:
             return [CanViewParentDictionary(), ]
+
+        if self.request.method == 'DELETE' and self.is_hard_delete_requested():
+            return [IsAdminUser(), ]
 
         return [CanEditParentDictionary(), ]
 
@@ -146,9 +150,16 @@ class MappingRetrieveUpdateDestroyView(MappingBaseView, RetrieveAPIView, UpdateA
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    def is_hard_delete_requested(self):
+        return self.request.query_params.get('hardDelete', None) in ['true', True, 'True']
+
     def destroy(self, request, *args, **kwargs):
         mapping = self.get_object()
         comment = request.data.get('update_comment', None) or request.data.get('comment', None)
+        if self.is_hard_delete_requested():
+            mapping.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
         errors = mapping.retire(request.user, comment)
 
         if errors:
@@ -161,7 +172,7 @@ class MappingReactivateView(MappingBaseView, UpdateAPIView):
     serializer_class = MappingDetailSerializer
 
     def get_object(self, queryset=None):
-        return get_object_or_404(self.get_queryset(None), id=F('versioned_object_id'))
+        return get_object_or_404(self.get_queryset(), id=F('versioned_object_id'))
 
     def get_permissions(self):
         if self.request.method in ['GET']:
@@ -183,7 +194,7 @@ class MappingReactivateView(MappingBaseView, UpdateAPIView):
 class MappingVersionsView(MappingBaseView, ConceptDictionaryMixin, ListWithHeadersMixin):
     permission_classes = (CanViewParentDictionary,)
 
-    def get_queryset(self, _=None):
+    def get_queryset(self):
         return super().get_queryset().exclude(id=F('versioned_object_id'))
 
     def get_serializer_class(self):
@@ -198,7 +209,7 @@ class MappingVersionRetrieveView(MappingBaseView, RetrieveAPIView):
     permission_classes = (CanViewParentDictionary,)
 
     def get_object(self, queryset=None):
-        instance = self.get_queryset(None).first()
+        instance = self.get_queryset().first()
         if not instance:
             raise Http404()
         return instance
@@ -210,7 +221,7 @@ class MappingVersionListAllView(MappingBaseView, ListWithHeadersMixin):
     def get_serializer_class(self):
         return MappingDetailSerializer if self.is_verbose() else MappingListSerializer
 
-    def get_queryset(self, _=None):
+    def get_queryset(self):
         return Mapping.global_listing_queryset(
             self.get_filter_params(), self.request.user
         ).select_related(

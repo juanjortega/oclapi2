@@ -199,7 +199,7 @@ class SourceImporter(BaseResourceImporter):
         "public_access", "default_locale", "supported_locales", "website", "extras", "external_id",
         'canonical_url', 'identifier', 'contact', 'jurisdiction', 'publisher', 'purpose', 'copyright',
         'revision_date', 'text', 'content_type', 'experimental', 'case_sensitive', 'collection_reference',
-        'hierarchy_meaning', 'compositional', 'version_needed'
+        'hierarchy_meaning', 'compositional', 'version_needed', 'meta',
     ]
 
     def exists(self):
@@ -276,7 +276,7 @@ class CollectionImporter(BaseResourceImporter):
         "id", "short_code", "name", "full_name", "description", "collection_type", "custom_validation_schema",
         "public_access", "default_locale", "supported_locales", "website", "extras", "external_id",
         'canonical_url', 'identifier', 'contact', 'jurisdiction', 'publisher', 'purpose', 'copyright',
-        'revision_date', 'text', 'immutable', 'experimental', 'locked_date'
+        'revision_date', 'text', 'immutable', 'experimental', 'locked_date', 'meta',
     ]
 
     def exists(self):
@@ -349,7 +349,10 @@ class CollectionVersionImporter(BaseResourceImporter):
 
 class ConceptImporter(BaseResourceImporter):
     mandatory_fields = {"id"}
-    allowed_fields = ["id", "external_id", "concept_class", "datatype", "names", "descriptions", "retired", "extras"]
+    allowed_fields = [
+        "id", "external_id", "concept_class", "datatype", "names", "descriptions", "retired", "extras",
+        "parent_concept_urls",
+    ]
 
     def __init__(self, data, user, update_if_exists):
         super().__init__(data, user, update_if_exists)
