@@ -49,6 +49,8 @@ services:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "CELERY_WORKER_NAME=default ./start_celery_worker.sh -P prefork -Q default --autoscale=10,2"]
     restart: "always"
+    depends_on:
+      - redis    
     healthcheck:
       test: ["CMD-SHELL", "-c", "CELERY_WORKER_NAME=default ./ping_celery_worker.sh"]
     environment:
@@ -59,6 +61,8 @@ services:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "CELERY_WORKER_NAME=indexing ./start_celery_worker.sh -P prefork -Q indexing --autoscale=10,2"]
     restart: "always"
+    depends_on:
+      - redis
     healthcheck:
       test: ["CMD-SHELL", "-c", "CELERY_WORKER_NAME=indexing ./ping_celery_worker.sh"]
     environment:
@@ -69,6 +73,8 @@ services:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "CELERY_WORKER_NAME=concurrent ./start_celery_worker.sh -P prefork -Q concurrent -c 10"]
     restart: "always"
+    depends_on:
+      - redis
     healthcheck:
       test:  ["CMD-SHELL", "-c", "CELERY_WORKER_NAME=concurrent ./ping_celery_worker.sh"]
     environment:
@@ -79,6 +85,8 @@ services:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_0_1 ./start_celery_worker.sh -Q bulk_import_0,bulk_import_1 -c 1"]
     restart: "always"
+    depends_on:
+      - redis
     healthcheck:
       test:  ["CMD-SHELL", "-c", "CELERY_WORKER_NAME=bulk_import_0_1 ./ping_celery_worker.sh"]
     environment:
@@ -89,6 +97,8 @@ services:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_2_3 ./start_celery_worker.sh -Q bulk_import_2,bulk_import_3 -c 1"]
     restart: "always"
+    depends_on:
+      - redis
     healthcheck:
       test:  ["CMD-SHELL", "-c", "CELERY_WORKER_NAME=bulk_import_2_3 ./ping_celery_worker.sh"]
     environment:
@@ -99,6 +109,8 @@ services:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_root ./start_celery_worker.sh -Q bulk_import_root -c 1"]
     restart: "always"
+    depends_on:
+      - redis
     healthcheck:
       test:  ["CMD-SHELL", "-c", "CELERY_WORKER_NAME=bulk_import_root ./ping_celery_worker.sh"]
     environment:
@@ -135,6 +147,13 @@ services:
     restart: "always"
     healthcheck:
       test: "curl --silent --fail http://localhost:9200/_cluster/health || exit 1"
+  kibana:
+    image: kibana:7.8.1
+    ports:
+     - 5601:5601
+    environment:
+      ELASTICSEARCH_HOSTS: http://es:9200
+
 volumes:
   postgres-data:
   es-data:
