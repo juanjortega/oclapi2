@@ -78,5 +78,74 @@ class WebUserCredentialsImporterView(BaseImporterView):
     importer = 'web_user_credential'
 
 
+class UserTokensImporterView(BaseImporterView):
+    importer = 'tokens'
+
+
 class CollectionReferenceImporterView(BaseImporterView):
     importer = 'collection_reference'
+
+
+class CollectionMappingReferenceImporterView(BaseImporterView):
+    importer = 'mapping_reference'
+
+
+class CollectionParentConnectorView(APIView):
+    swagger_schema = None
+    permission_classes = (IsAdminUser,)
+
+    @staticmethod
+    def post(request):
+        collection_uri = request.data.get('collection_uri')
+        parent_uri = request.data.get('parent_uri')
+        if not parent_uri or not collection_uri:
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+        is_user = '/users/' in parent_uri
+        if is_user:
+            from core.users.models import UserProfile
+            parent = UserProfile.objects.filter(uri=parent_uri).first()
+        else:
+            from core.orgs.models import Organization
+            parent = Organization.objects.filter(uri=parent_uri).first()
+        if not parent:
+            return Response(dict(detail='Parent not found'), status=status.HTTP_404_NOT_FOUND)
+
+        from core.collections.models import Collection
+        collection = Collection.objects.filter(uri=collection_uri).first()
+        if not collection:
+            return Response(dict(detail='Collection not found'), status=status.HTTP_404_NOT_FOUND)
+
+        if is_user:
+            collection.user = parent
+        else:
+            collection.organization = parent
+        collection.uri = collection.calculate_uri()
+
+        collection.save()
+        return Response(status=status.HTTP_200_OK)
+
+
+class ConceptView(APIView):
+    def delete(self, _):
+        uris = self.request.data.get('uris', [])
+        if not isinstance(uris, list):
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+        from core.concepts.models import Concept
+        for concept in Concept.objects.filter(uri__in=uris):
+            concept.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MappingView(APIView):
+    def delete(self, _):
+        uris = self.request.data.get('uris', [])
+        if not isinstance(uris, list):
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+        from core.mappings.models import Mapping
+        for concept in Mapping.objects.filter(uri__in=uris):
+            concept.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
