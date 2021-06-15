@@ -1,14 +1,15 @@
+from django.db import models
 from rest_framework import generics, status
-from rest_framework.generics import RetrieveAPIView, UpdateAPIView, DestroyAPIView
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.generics import RetrieveAPIView, UpdateAPIView, DestroyAPIView, ListAPIView, CreateAPIView
 from rest_framework.response import Response
 
-from core.client_configs.serializers import ClientConfigSerializer
+from core.client_configs.serializers import ClientConfigSerializer, ClientConfigTemplateSerializer
 from core.common.views import BaseAPIView
 from .models import ClientConfig
 
 
 class ClientConfigBaseView(generics.GenericAPIView):
-    swagger_schema = None
     lookup_field = 'id'
     pk_field = 'id'
     queryset = ClientConfig.objects.filter(is_active=True)
@@ -16,15 +17,12 @@ class ClientConfigBaseView(generics.GenericAPIView):
 
 
 class ClientConfigView(ClientConfigBaseView, RetrieveAPIView, UpdateAPIView, DestroyAPIView):
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        serializer.is_valid(raise_exception=True)
+    def perform_destroy(self, instance: ClientConfig):
+        if not self.request.user.is_staff:
+            if instance.created_by != self.request.user:
+                raise PermissionDenied()
 
-        return Response(serializer.data)
+        super().perform_destroy(instance)
 
 
 class ResourceClientConfigsView(BaseAPIView, RetrieveAPIView):
@@ -33,7 +31,7 @@ class ResourceClientConfigsView(BaseAPIView, RetrieveAPIView):
 
     def get(self, request, *args, **kwargs):
         instance = self.get_object()
-        configs = instance.client_configs.filter(is_active=True)
+        configs = instance.client_configs.filter(is_active=True, is_template=False)
 
         return Response(self.get_serializer(configs, many=True).data, status=status.HTTP_200_OK)
 
@@ -47,3 +45,13 @@ class ResourceClientConfigsView(BaseAPIView, RetrieveAPIView):
             if serializer.is_valid():
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ResourceTemplatesView(ListAPIView, CreateAPIView):
+    serializer_class = ClientConfigTemplateSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        return ClientConfig.objects.filter(
+            is_template=True, is_active=True, resource_type__app_label=self.kwargs.get('resource')
+        ).filter(models.Q(public=True) | models.Q(created_by=user))

@@ -1,9 +1,11 @@
 from pydash import get
-from rest_framework.fields import CharField, JSONField, IntegerField, DateTimeField
+from rest_framework.fields import CharField, JSONField, IntegerField, DateTimeField, ListField
 from rest_framework.serializers import ModelSerializer
 
 from core.common.constants import MAPPING_LOOKUP_CONCEPTS, MAPPING_LOOKUP_SOURCES, MAPPING_LOOKUP_FROM_CONCEPT, \
-    MAPPING_LOOKUP_TO_CONCEPT, MAPPING_LOOKUP_FROM_SOURCE, MAPPING_LOOKUP_TO_SOURCE, INCLUDE_EXTRAS_PARAM
+    MAPPING_LOOKUP_TO_CONCEPT, MAPPING_LOOKUP_FROM_SOURCE, MAPPING_LOOKUP_TO_SOURCE, INCLUDE_EXTRAS_PARAM, \
+    INCLUDE_SOURCE_VERSIONS, INCLUDE_COLLECTION_VERSIONS
+from core.common.fields import EncodedDecodedCharField
 from core.concepts.serializers import ConceptListSerializer, ConceptDetailSerializer
 from core.mappings.models import Mapping
 from core.sources.serializers import SourceListSerializer, SourceDetailSerializer
@@ -24,6 +26,8 @@ class MappingListSerializer(ModelSerializer):
     to_source = SourceListSerializer()
     from_concept_name_resolved = CharField(source='from_concept.display_name', read_only=True)
     to_concept_name_resolved = CharField(source='to_concept.display_name', read_only=True)
+    to_concept_code = EncodedDecodedCharField(required=False)
+    from_concept_code = EncodedDecodedCharField(required=False)
 
     class Meta:
         model = Mapping
@@ -73,10 +77,30 @@ class MappingListSerializer(ModelSerializer):
 
 class MappingVersionListSerializer(MappingListSerializer):
     previous_version_url = CharField(read_only=True, source='prev_version_uri')
+    source_versions = ListField(read_only=True)
+    collection_versions = ListField(read_only=True)
 
     class Meta:
         model = Mapping
-        fields = MappingListSerializer.Meta.fields + ('previous_version_url',)
+        fields = MappingListSerializer.Meta.fields + (
+            'previous_version_url', 'source_versions', 'collection_versions',
+        )
+
+    def __init__(self, *args, **kwargs):
+        params = get(kwargs, 'context.request.query_params')
+        self.query_params = params.dict() if params else dict()
+        self.include_source_versions = self.query_params.get(INCLUDE_SOURCE_VERSIONS) in ['true', True]
+        self.include_collection_versions = self.query_params.get(INCLUDE_COLLECTION_VERSIONS) in ['true', True]
+
+        try:
+            if not self.include_source_versions:
+                self.fields.pop('source_versions', None)
+            if not self.include_collection_versions:
+                self.fields.pop('collection_versions', None)
+        except:  # pylint: disable=bare-except
+            pass
+
+        super().__init__(*args, **kwargs)
 
 
 class MappingDetailSerializer(MappingListSerializer):
@@ -89,7 +113,6 @@ class MappingDetailSerializer(MappingListSerializer):
     map_type = CharField(required=True)
     to_concept_url = CharField(required=False)
     from_concept_url = CharField(required=False)
-    previous_version_url = CharField(read_only=True, source='prev_version_uri')
     from_concept = ConceptDetailSerializer()
     to_concept = ConceptDetailSerializer()
     from_source = SourceDetailSerializer()
@@ -101,7 +124,7 @@ class MappingDetailSerializer(MappingListSerializer):
         model = Mapping
         fields = MappingListSerializer.Meta.fields + (
             'type', 'uuid', 'extras', 'created_on', 'updated_on',
-            'created_by', 'updated_by', 'parent_id', 'previous_version_url', 'internal_reference_id',
+            'created_by', 'updated_by', 'parent_id', 'internal_reference_id',
         )
 
     def create(self, validated_data):
@@ -115,3 +138,15 @@ class MappingDetailSerializer(MappingListSerializer):
         if errors:
             self._errors.update(errors)
         return instance
+
+
+class MappingVersionDetailSerializer(MappingDetailSerializer):
+    previous_version_url = CharField(read_only=True, source='prev_version_uri')
+    source_versions = ListField(read_only=True)
+    collection_versions = ListField(read_only=True)
+
+    class Meta:
+        model = Mapping
+        fields = MappingDetailSerializer.Meta.fields + (
+            'previous_version_url', 'source_versions', 'collection_versions',
+        )

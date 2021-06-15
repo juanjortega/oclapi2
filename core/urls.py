@@ -24,7 +24,7 @@ import core.concepts.views as concept_views
 import core.mappings.views as mapping_views
 from core.common.constants import NAMESPACE_PATTERN
 from core.common.utils import get_api_base_url
-from core.common.views import RootView, FeedbackView
+from core.common.views import RootView, FeedbackView, APIVersionView
 from core.importers.views import BulkImportView
 
 SchemaView = get_schema_view(
@@ -40,6 +40,7 @@ SchemaView = get_schema_view(
 
 urlpatterns = [
     path('', RootView.as_view(), name='root'),
+    path('version/', APIVersionView.as_view(), name='api-version'),
     path('feedback/', FeedbackView.as_view(), name='feedback'),
     url(r'^swagger(?P<format>\.json|\.yaml)$', SchemaView.without_ui(cache_timeout=0), name='schema-json'),
     url(r'^swagger/$', SchemaView.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
@@ -53,6 +54,7 @@ urlpatterns = [
     path('collections/', include('core.collections.urls'), name='collections_urls'),
     path('concepts/', concept_views.ConceptVersionListAllView.as_view(), name='all_concepts_urls'),
     path('mappings/', mapping_views.MappingVersionListAllView.as_view(), name='all_mappings_urls'),
+    path('mappings/debug/', mapping_views.MappingDebugRetrieveDestroyView.as_view(), name='mapping-debug'),
     path('importers/', include('core.importers.urls'), name='importer_urls'),
     path('v1-importers/', include('core.v1_importers.urls'), name='v1_importer_urls'),
     path('indexes/', include('core.indexes.urls'), name='indexes_urls'),

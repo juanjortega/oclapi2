@@ -85,9 +85,10 @@ class CollectionCreateOrUpdateSerializer(ModelSerializer):
         return collection
 
     def update(self, instance, validated_data):
+        original_schema = instance.custom_validation_schema
         collection = self.prepare_object(validated_data, instance)
         user = self.context['request'].user
-        errors = Collection.persist_changes(collection, user)
+        errors = Collection.persist_changes(collection, user, original_schema)
         self._errors.update(errors)
         return collection
 
@@ -322,6 +323,15 @@ class CollectionReferenceSerializer(ModelSerializer):
     class Meta:
         model = CollectionReference
         fields = ('expression', 'reference_type', 'id')
+
+
+class CollectionReferenceDetailSerializer(CollectionReferenceSerializer):
+    class Meta:
+        model = CollectionReference
+        fields = (
+            *CollectionReferenceSerializer.Meta.fields, 'last_resolved_at', 'created_at', 'updated_at',
+            'internal_reference_id'
+        )
 
 
 class CollectionVersionExportSerializer(CollectionVersionDetailSerializer):

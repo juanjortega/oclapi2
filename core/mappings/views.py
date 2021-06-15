@@ -3,7 +3,7 @@ from django.http import QueryDict, Http404
 from django.shortcuts import get_object_or_404
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status
-from rest_framework.generics import DestroyAPIView, UpdateAPIView, RetrieveAPIView
+from rest_framework.generics import DestroyAPIView, UpdateAPIView, RetrieveAPIView, ListAPIView
 from rest_framework.mixins import CreateModelMixin
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
@@ -14,7 +14,7 @@ from core.common.mixins import ListWithHeadersMixin, ConceptDictionaryMixin
 from core.common.swagger_parameters import (
     q_param, limit_param, sort_desc_param, page_param, exact_match_param, sort_asc_param, verbose_param,
     include_facets_header, updated_since_param, include_retired_param,
-    compress_header)
+    compress_header, include_source_versions_param, include_collection_versions_param)
 from core.common.views import SourceChildCommonBaseView, SourceChildExtrasView, \
     SourceChildExtraRetrieveUpdateDestroyView
 from core.concepts.permissions import CanEditParentDictionary, CanViewParentDictionary
@@ -22,7 +22,8 @@ from core.mappings.constants import PARENT_VERSION_NOT_LATEST_CANNOT_UPDATE_MAPP
 from core.mappings.documents import MappingDocument
 from core.mappings.models import Mapping
 from core.mappings.search import MappingSearch
-from core.mappings.serializers import MappingDetailSerializer, MappingListSerializer, MappingVersionListSerializer
+from core.mappings.serializers import MappingDetailSerializer, MappingListSerializer, MappingVersionListSerializer, \
+    MappingVersionDetailSerializer
 
 
 class MappingBaseView(SourceChildCommonBaseView):
@@ -68,12 +69,16 @@ class MappingListView(MappingBaseView, ListWithHeadersMixin, CreateModelMixin):
         )
 
     def get(self, request, *args, **kwargs):
+        self.set_parent_resource(False)
+        if self.parent_resource:
+            self.check_object_permissions(request, self.parent_resource)
         return self.list(request, *args, **kwargs)
 
-    def set_parent_resource(self):
+    def set_parent_resource(self, __pop=True):
         from core.sources.models import Source
-        source = self.kwargs.pop('source', None)
-        source_version = self.kwargs.pop('version', HEAD)
+        source = self.kwargs.pop('source', None) if __pop else self.kwargs.get('source', None)
+        collection = self.kwargs.pop('collection', None) if __pop else self.kwargs.get('collection', None)
+        container_version = self.kwargs.pop('version', HEAD) if __pop else self.kwargs.get('version', HEAD)
         parent_resource = None
         if 'org' in self.kwargs:
             filters = dict(organization__mnemonic=self.kwargs['org'])
@@ -81,7 +86,10 @@ class MappingListView(MappingBaseView, ListWithHeadersMixin, CreateModelMixin):
             username = self.request.user.username if self.user_is_self else self.kwargs.get('user')
             filters = dict(user__username=username)
         if source:
-            parent_resource = Source.get_version(source, source_version, filters)
+            parent_resource = Source.get_version(source, container_version or HEAD, filters)
+        if collection:
+            from core.collections.models import Collection
+            parent_resource = Collection.get_version(source, container_version or HEAD, filters)
         self.kwargs['parent_resource'] = self.parent_resource = parent_resource
 
     def post(self, request, **kwargs):  # pylint: disable=unused-argument
@@ -117,6 +125,8 @@ class MappingRetrieveUpdateDestroyView(MappingBaseView, RetrieveAPIView, UpdateA
 
         if not instance:
             raise Http404()
+
+        self.check_object_permissions(self.request, instance)
 
         return instance
 
@@ -172,7 +182,9 @@ class MappingReactivateView(MappingBaseView, UpdateAPIView):
     serializer_class = MappingDetailSerializer
 
     def get_object(self, queryset=None):
-        return get_object_or_404(self.get_queryset(), id=F('versioned_object_id'))
+        instance = get_object_or_404(self.get_queryset(), id=F('versioned_object_id'))
+        self.check_object_permissions(self.request, instance)
+        return instance
 
     def get_permissions(self):
         if self.request.method in ['GET']:
@@ -195,23 +207,35 @@ class MappingVersionsView(MappingBaseView, ConceptDictionaryMixin, ListWithHeade
     permission_classes = (CanViewParentDictionary,)
 
     def get_queryset(self):
-        return super().get_queryset().exclude(id=F('versioned_object_id'))
+        queryset = super().get_queryset()
+        instance = queryset.first()
+
+        self.check_object_permissions(self.request, instance)
+
+        return queryset.exclude(id=F('versioned_object_id'))
 
     def get_serializer_class(self):
-        return MappingDetailSerializer if self.is_verbose() else MappingVersionListSerializer
+        return MappingVersionDetailSerializer if self.is_verbose() else MappingVersionListSerializer
 
+    @swagger_auto_schema(
+        manual_parameters=[
+            include_source_versions_param, include_collection_versions_param
+        ]
+    )
     def get(self, request, *args, **kwargs):
         return self.list(request, *args, **kwargs)
 
 
 class MappingVersionRetrieveView(MappingBaseView, RetrieveAPIView):
-    serializer_class = MappingDetailSerializer
+    serializer_class = MappingVersionDetailSerializer
     permission_classes = (CanViewParentDictionary,)
 
     def get_object(self, queryset=None):
         instance = self.get_queryset().first()
         if not instance:
             raise Http404()
+
+        self.check_object_permissions(self.request, instance)
         return instance
 
 
@@ -240,9 +264,28 @@ class MappingVersionListAllView(MappingBaseView, ListWithHeadersMixin):
 
 
 class MappingExtrasView(SourceChildExtrasView, MappingBaseView):
-    serializer_class = MappingDetailSerializer
+    serializer_class = MappingVersionDetailSerializer
 
 
 class MappingExtraRetrieveUpdateDestroyView(SourceChildExtraRetrieveUpdateDestroyView, MappingBaseView):
-    serializer_class = MappingDetailSerializer
+    serializer_class = MappingVersionDetailSerializer
     model = Mapping
+
+
+class MappingDebugRetrieveDestroyView(ListAPIView):
+    permission_classes = (IsAdminUser, )
+    serializer_class = MappingVersionDetailSerializer
+
+    def get_queryset(self):
+        params = self.request.query_params.dict()
+        if not params:
+            Mapping.objects.none()
+        to_concept_code = params.pop('to_concept_code', None)
+        from_concept_code = params.pop('from_concept_code', None)
+        filters = params
+        if to_concept_code:
+            filters['to_concept_code__icontains'] = to_concept_code
+        if from_concept_code:
+            filters['from_concept_code__icontains'] = from_concept_code
+
+        return Mapping.objects.filter(**filters)

@@ -374,6 +374,14 @@ class SourceContainerMixin:
 
 class SourceChildMixin:
     @property
+    def source_versions(self):
+        return self.sources.exclude(version=HEAD).values_list('uri', flat=True)
+
+    @property
+    def collection_versions(self):
+        return self.collection_set.exclude(version=HEAD).values_list('uri', flat=True)
+
+    @property
     def versions(self):
         if self.is_versioned_object:
             self.versions_set.exclude(id=F('versioned_object_id')).all()
@@ -503,7 +511,7 @@ class ConceptContainerExportMixin:
         logger.debug(
             'Export requested for %s version %s - Requesting AWS-S3 key', self.entity.lower(), version.version
         )
-        if version.is_head:
+        if version.is_head and not request.user.is_staff:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
         if version.has_export():
@@ -532,7 +540,7 @@ class ConceptContainerExportMixin:
     def post(self, request, *args, **kwargs):  # pylint: disable=unused-argument
         version = self.get_object()
 
-        if version.is_head:
+        if version.is_head and not request.user.is_staff:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
         logger.debug('%s Export requested for version %s (post)', self.entity, version.version)
@@ -556,7 +564,7 @@ class ConceptContainerExportMixin:
         user = request.user
         version = self.get_object()
 
-        if version.is_head:
+        if version.is_head and not user.is_staff:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
         permitted = user.is_staff or user.is_superuser or user.is_admin_for(version)

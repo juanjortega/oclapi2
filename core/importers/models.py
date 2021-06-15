@@ -13,7 +13,7 @@ from core.collections.models import Collection
 from core.common.constants import HEAD
 from core.common.services import RedisService
 from core.common.tasks import bulk_import_parts_inline, delete_organization
-from core.common.utils import drop_version
+from core.common.utils import drop_version, is_url_encoded_string, encode_string
 from core.concepts.models import Concept
 from core.mappings.models import Mapping
 from core.orgs.models import Organization
@@ -193,7 +193,7 @@ class OrganizationImporter(BaseResourceImporter):
 
 
 class SourceImporter(BaseResourceImporter):
-    mandatory_fields = {'id', 'short_code', 'name', 'full_name', 'owner_type', 'owner', 'source_type'}
+    mandatory_fields = {'id', 'name', 'owner_type', 'owner'}
     allowed_fields = [
         "id", "short_code", "name", "full_name", "description", "source_type", "custom_validation_schema",
         "public_access", "default_locale", "supported_locales", "website", "extras", "external_id",
@@ -271,7 +271,7 @@ class SourceVersionImporter(BaseResourceImporter):
 
 
 class CollectionImporter(BaseResourceImporter):
-    mandatory_fields = {'id', 'short_code', 'name', 'full_name', 'owner_type', 'owner', 'collection_type'}
+    mandatory_fields = {'id', 'name', 'owner_type', 'owner'}
     allowed_fields = [
         "id", "short_code", "name", "full_name", "description", "collection_type", "custom_validation_schema",
         "public_access", "default_locale", "supported_locales", "website", "extras", "external_id",
@@ -379,6 +379,8 @@ class ConceptImporter(BaseResourceImporter):
         super().parse()
         self.data['parent'] = source
         self.data['name'] = self.data['mnemonic'] = self.data.pop('id')
+        if not is_url_encoded_string(self.data['mnemonic']):
+            self.data['mnemonic'] = encode_string(self.data['mnemonic'])
 
     def clean(self):
         if not self.is_valid():
@@ -449,6 +451,13 @@ class MappingImporter(BaseResourceImporter):
 
         if self.get('id'):
             self.data['mnemonic'] = self.data.pop('id')
+
+        from_concept_code = self.data.get('from_concept_code')
+        to_concept_code = self.data.get('to_concept_code')
+        if from_concept_code and not is_url_encoded_string(from_concept_code):
+            self.data['from_concept_code'] = encode_string(from_concept_code)
+        if to_concept_code and not is_url_encoded_string(to_concept_code):
+            self.data['to_concept_code'] = encode_string(to_concept_code)
 
     def clean(self):
         if not self.is_valid():
@@ -681,14 +690,14 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
         self._json_result = None
         self.redis_service = RedisService()
         if self.content:
-            self.input_list = self.content.splitlines()
+            self.input_list = self.content if isinstance(self.content, list) else self.content.splitlines()
             self.total = len(self.input_list)
         self.make_resource_distribution()
         self.make_parts()
 
     def make_resource_distribution(self):
         for line in self.input_list:
-            data = json.loads(line)
+            data = line if isinstance(line, dict) else json.loads(line)
             data_type = data['type']
             if data_type not in self.resource_distribution:
                 self.resource_distribution[data_type] = []
@@ -711,7 +720,7 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
         self.parts.append([])
 
         for data in self.input_list:
-            line = json.loads(data)
+            line = data if isinstance(data, dict) else json.loads(data)
             data_type = line.get('type', None).lower()
             if data_type not in ['organization', 'source', 'collection']:
                 if prev_line:

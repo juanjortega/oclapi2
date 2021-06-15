@@ -37,7 +37,7 @@ class Collection(ConceptContainerModel):
         'owner_type': {'sortable': False, 'filterable': True, 'facet': True},
         'custom_validation_schema': {'sortable': False, 'filterable': True, 'facet': True},
         'canonical_url': {'sortable': True, 'filterable': True},
-        'experimental': {'sortable': False, 'filterable': True, 'facet': True},
+        'experimental': {'sortable': False, 'filterable': False, 'facet': True},
         'external_id': {'sortable': False, 'filterable': True, 'facet': False, 'exact': False},
     }
 
@@ -289,16 +289,16 @@ class Collection(ConceptContainerModel):
             head = self.head
             ref_hash = {'col_reference': reference}
 
-            error = Collection.persist_changes(head, user, **ref_hash)
+            error = Collection.persist_changes(head, user, None, **ref_hash)
             if error:
                 errors[expression] = error
 
         return errors
 
     @classmethod
-    def persist_changes(cls, obj, updated_by, **kwargs):
+    def persist_changes(cls, obj, updated_by, original_schema, **kwargs):
         col_reference = kwargs.pop('col_reference', False)
-        errors = super().persist_changes(obj, updated_by, **kwargs)
+        errors = super().persist_changes(obj, updated_by, original_schema, **kwargs)
         if col_reference and not errors:
             obj.fill_data_from_reference(col_reference)
         return errors
@@ -352,6 +352,18 @@ class Collection(ConceptContainerModel):
                 continue
 
         return all_related_mappings
+
+    def get_cascaded_mapping_uris_from_concept_expressions(self, expressions):
+        mapping_uris = []
+
+        for expression in expressions:
+            if is_concept(expression):
+                mapping_uris += list(
+                    self.mappings.filter(
+                        from_concept__uri__icontains=drop_version(expression)).values_list('uri', flat=True)
+                )
+
+        return mapping_uris
 
 
 class CollectionReference(models.Model):

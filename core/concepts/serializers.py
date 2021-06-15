@@ -4,7 +4,8 @@ from rest_framework.fields import CharField, DateTimeField, BooleanField, URLFie
 from rest_framework.serializers import ModelSerializer
 
 from core.common.constants import INCLUDE_INVERSE_MAPPINGS_PARAM, INCLUDE_MAPPINGS_PARAM, INCLUDE_EXTRAS_PARAM, \
-    INCLUDE_PARENT_CONCEPTS, INCLUDE_CHILD_CONCEPTS
+    INCLUDE_PARENT_CONCEPTS, INCLUDE_CHILD_CONCEPTS, INCLUDE_SOURCE_VERSIONS, INCLUDE_COLLECTION_VERSIONS
+from core.common.fields import EncodedDecodedCharField
 from core.concepts.models import Concept, LocalizedText
 
 
@@ -99,7 +100,7 @@ class ConceptDescriptionSerializer(ConceptLabelSerializer):
 
 class ConceptListSerializer(ModelSerializer):
     uuid = CharField(source='id', read_only=True)
-    id = CharField(source='mnemonic')
+    id = EncodedDecodedCharField(source='mnemonic')
     source = CharField(source='parent_resource')
     owner = CharField(source='owner_name')
     update_comment = CharField(source='comment', required=False, allow_null=True, allow_blank=True)
@@ -150,19 +151,37 @@ class ConceptListSerializer(ModelSerializer):
 
 class ConceptVersionListSerializer(ConceptListSerializer):
     previous_version_url = CharField(read_only=True, source='prev_version_uri')
+    source_versions = ListField(read_only=True)
+    collection_versions = ListField(read_only=True)
 
     class Meta:
         model = Concept
         fields = ConceptListSerializer.Meta.fields + (
-            'previous_version_url',
+            'previous_version_url', 'source_versions', 'collection_versions'
         )
+
+    def __init__(self, *args, **kwargs):
+        params = get(kwargs, 'context.request.query_params')
+        self.query_params = params.dict() if params else dict()
+        self.include_source_versions = self.query_params.get(INCLUDE_SOURCE_VERSIONS) in ['true', True]
+        self.include_collection_versions = self.query_params.get(INCLUDE_COLLECTION_VERSIONS) in ['true', True]
+
+        try:
+            if not self.include_source_versions:
+                self.fields.pop('source_versions', None)
+            if not self.include_collection_versions:
+                self.fields.pop('collection_versions', None)
+        except:  # pylint: disable=bare-except
+            pass
+
+        super().__init__(*args, **kwargs)
 
 
 class ConceptDetailSerializer(ModelSerializer):
     uuid = CharField(source='id', read_only=True)
     version = CharField(read_only=True)
     type = CharField(source='versioned_resource_type', read_only=True)
-    id = CharField(source='mnemonic', required=True)
+    id = EncodedDecodedCharField(source='mnemonic', required=True)
     source = CharField(source='parent_resource', read_only=True)
     parent_id = UUIDField(write_only=True)
     owner = CharField(source='owner_name', read_only=True)
@@ -253,7 +272,7 @@ class ConceptDetailSerializer(ModelSerializer):
 class ConceptVersionDetailSerializer(ModelSerializer):
     type = CharField(source='resource_type')
     uuid = CharField(source='id')
-    id = CharField(source='mnemonic')
+    id = EncodedDecodedCharField(source='mnemonic')
     names = LocalizedNameSerializer(many=True)
     descriptions = LocalizedDescriptionSerializer(many=True, required=False, allow_null=True)
     source = CharField(source='parent_resource')
@@ -272,6 +291,8 @@ class ConceptVersionDetailSerializer(ModelSerializer):
     child_concepts = SerializerMethodField()
     parent_concept_urls = ListField(read_only=True)
     child_concept_urls = ListField(read_only=True)
+    source_versions = ListField(read_only=True)
+    collection_versions = ListField(read_only=True)
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
@@ -302,6 +323,7 @@ class ConceptVersionDetailSerializer(ModelSerializer):
             'version', 'created_on', 'updated_on', 'version_created_on', 'version_created_by', 'update_comment',
             'is_latest_version', 'locale', 'url', 'owner_type', 'version_url', 'mappings', 'previous_version_url',
             'internal_reference_id', 'parent_concepts', 'child_concepts', 'parent_concept_urls', 'child_concept_urls',
+            'source_versions', 'collection_versions'
         )
 
     def get_mappings(self, obj):
