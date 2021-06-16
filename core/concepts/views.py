@@ -17,7 +17,7 @@ from core.common.mixins import ListWithHeadersMixin, ConceptDictionaryMixin
 from core.common.swagger_parameters import (
     q_param, limit_param, sort_desc_param, page_param, exact_match_param, sort_asc_param, verbose_param,
     include_facets_header, updated_since_param, include_inverse_mappings_param, include_retired_param,
-    compress_header)
+    compress_header, include_source_versions_param, include_collection_versions_param)
 from core.common.views import SourceChildCommonBaseView, SourceChildExtrasView, \
     SourceChildExtraRetrieveUpdateDestroyView
 from core.concepts.constants import PARENT_VERSION_NOT_LATEST_CANNOT_UPDATE_CONCEPT
@@ -98,20 +98,27 @@ class ConceptListView(ConceptBaseView, ListWithHeadersMixin, CreateModelMixin):
         ).prefetch_related('names')
 
     def get(self, request, *args, **kwargs):
+        self.set_parent_resource(False)
+        if self.parent_resource:
+            self.check_object_permissions(request, self.parent_resource)
         return self.list(request, *args, **kwargs)
 
-    def set_parent_resource(self):
-        from core.sources.models import Source
+    def set_parent_resource(self, __pop=True):
         parent_resource = None
-        source = self.kwargs.pop('source', None)
-        source_version = self.kwargs.pop('version', HEAD)
+        source = self.kwargs.pop('source', None) if __pop else self.kwargs.get('source', None)
+        collection = self.kwargs.pop('collection', None) if __pop else self.kwargs.get('collection', None)
+        container_version = self.kwargs.pop('version', HEAD) if __pop else self.kwargs.get('version', HEAD)
         if 'org' in self.kwargs:
             filters = dict(organization__mnemonic=self.kwargs['org'])
         else:
             username = self.request.user.username if self.user_is_self else self.kwargs.get('user')
             filters = dict(user__username=username)
         if source:
-            parent_resource = Source.get_version(source, source_version, filters)
+            from core.sources.models import Source
+            parent_resource = Source.get_version(source, container_version or HEAD, filters)
+        if collection:
+            from core.collections.models import Collection
+            parent_resource = Collection.get_version(source, container_version or HEAD, filters)
         self.kwargs['parent_resource'] = self.parent_resource = parent_resource
 
     def post(self, request, **kwargs):  # pylint: disable=unused-argument
@@ -147,6 +154,8 @@ class ConceptRetrieveUpdateDestroyView(ConceptBaseView, RetrieveAPIView, UpdateA
 
         if not instance:
             raise Http404()
+
+        self.check_object_permissions(self.request, instance)
 
         return instance
 
@@ -202,7 +211,9 @@ class ConceptReactivateView(ConceptBaseView, UpdateAPIView):
     serializer_class = ConceptDetailSerializer
 
     def get_object(self, queryset=None):
-        return get_object_or_404(self.get_queryset(), id=F('versioned_object_id'))
+        instance = get_object_or_404(self.get_queryset(), id=F('versioned_object_id'))
+        self.check_object_permissions(self.request, instance)
+        return instance
 
     def get_permissions(self):
         if self.request.method in ['GET']:
@@ -225,11 +236,18 @@ class ConceptVersionsView(ConceptBaseView, ConceptDictionaryMixin, ListWithHeade
     permission_classes = (CanViewParentDictionary,)
 
     def get_queryset(self):
-        return super().get_queryset().exclude(id=F('versioned_object_id'))
+        queryset = super().get_queryset()
+        self.check_object_permissions(self.request, queryset.first())
+        return queryset.exclude(id=F('versioned_object_id'))
 
     def get_serializer_class(self):
         return ConceptVersionDetailSerializer if self.is_verbose() else ConceptVersionListSerializer
 
+    @swagger_auto_schema(
+        manual_parameters=[
+            include_source_versions_param, include_collection_versions_param
+        ]
+    )
     def get(self, request, *args, **kwargs):
         return self.list(request, *args, **kwargs)
 
@@ -240,6 +258,7 @@ class ConceptMappingsView(ConceptBaseView, ListWithHeadersMixin):
 
     def get_queryset(self):
         concept = super().get_queryset().first()
+        self.check_object_permissions(self.request, concept)
         include_retired = self.request.query_params.get(INCLUDE_RETIRED_PARAM, False)
         include_indirect_mappings = self.request.query_params.get(INCLUDE_INVERSE_MAPPINGS_PARAM, 'false') == 'true'
         if include_indirect_mappings:
@@ -264,6 +283,7 @@ class ConceptVersionRetrieveView(ConceptBaseView, RetrieveAPIView):
         instance = self.get_queryset().first()
         if not instance:
             raise Http404()
+        self.check_object_permissions(self.request, instance)
         return instance
 
 
@@ -282,6 +302,7 @@ class ConceptLabelListCreateView(ConceptBaseView, ListWithHeadersMixin, ListCrea
         instance = super().get_queryset().first()
         if not instance:
             raise Http404()
+        self.check_object_permissions(self.request, instance)
         return instance
 
     def get_queryset(self):
@@ -330,6 +351,7 @@ class ConceptLabelRetrieveUpdateDestroyView(ConceptBaseView, RetrieveUpdateDestr
         instance = super().get_queryset().first()
         if not instance:
             raise Http404()
+        self.check_object_permissions(self.request, instance)
         return instance
 
     def get_object(self, queryset=None):

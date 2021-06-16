@@ -23,7 +23,7 @@ The new and improved OCL terminology service v2
 ENVIRONMENT=development|production
 API_BASE_URL=http://localhost:8000
 API_SUPERUSER_PASSWORD=qwertyu
-API_SUPERUSER_TOKEN=1df23g4h5j67
+API_SUPERUSER_TOKEN=1df23g4h5j67zz
 ```
 
 #### Puesta en Marcha

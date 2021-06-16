@@ -1,4 +1,5 @@
 import base64
+import urllib.parse
 from email.mime.image import MIMEImage
 
 from django.conf import settings
@@ -19,10 +20,12 @@ from core.common.constants import SEARCH_PARAM, LIST_DEFAULT_LIMIT, CSV_DEFAULT_
     LIMIT_PARAM, NOT_FOUND, MUST_SPECIFY_EXTRA_PARAM_IN_BODY, INCLUDE_RETIRED_PARAM, VERBOSE_PARAM, HEAD, LATEST
 from core.common.mixins import PathWalkerMixin
 from core.common.serializers import RootSerializer
-from core.common.utils import compact_dict_by_values, to_snake_case, to_camel_case, parse_updated_since_param
+from core.common.utils import compact_dict_by_values, to_snake_case, to_camel_case, parse_updated_since_param, \
+    is_url_encoded_string
 from core.concepts.permissions import CanViewParentDictionary, CanEditParentDictionary
 from core.orgs.constants import ORG_OBJECT_TYPE
 from core.users.constants import USER_OBJECT_TYPE
+from core import __version__
 
 
 class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
@@ -145,11 +148,12 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         search_str = search_str.replace('-', '_')
         if lower:
             search_str = search_str.lower()
+            search_str = search_str if is_url_encoded_string(search_str) else urllib.parse.quote_plus(search_str)
 
         return search_str
 
-    def get_wildcard_search_string(self):
-        return "*{}*".format(self.get_search_string())
+    def get_wildcard_search_string(self, _str):
+        return "*{}*".format(_str or self.get_search_string())
 
     def get_sort_attr(self):
         sort_field, desc = self.get_sort_and_desc()
@@ -372,7 +376,7 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
             from core.orgs.documents import OrganizationDocument
             if self.document_model in [OrganizationDocument]:
                 criteria |= (Q('match', public_can_view=False) & Q('match', user=username))
-            if self.is_concept_container_document_model():
+            if self.is_concept_container_document_model() or self.is_source_child_document_model():
                 criteria |= (Q('match', public_can_view=False) & Q('match', created_by=username))
 
         return criteria
@@ -385,7 +389,7 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         return (not collection or collection.startswith('!')) and (not version or version.startswith('!'))
 
     @property
-    def __search_results(self):  # pylint: disable=too-many-branches,too-many-locals
+    def __search_results(self):  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
         results = None
 
         if self.should_perform_es_search():
@@ -408,7 +412,7 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
             if self.is_exact_match_on():
                 results = results.query(self.get_exact_search_criterion())
             else:
-                results = results.query(self.get_wildcard_search_criterion())
+                results = results.query(self.get_wildcard_search_criterion() | self.get_exact_search_criterion())
 
             updated_since = parse_updated_since_param(self.request.query_params)
             if updated_since:
@@ -416,16 +420,14 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
 
             if extras_fields:
                 for field, value in extras_fields.items():
-                    results = results.filter(
-                        "query_string", query=value, fields=[field]
-                    )
+                    value = value.replace('/', '\\/')
+                    results = results.filter("query_string", query=value, fields=[field])
             if extras_fields_exists:
                 for field in extras_fields_exists:
-                    results = results.query(
-                        "exists", field="extras.{}".format(field)
-                    )
+                    results = results.query("exists", field="extras.{}".format(field))
             if extras_fields_exact:
                 for field, value in extras_fields_exact.items():
+                    value = value.replace('/', '\\/')
                     results = results.query("match", **{field: value}, _expand__to_dot=False)
 
             if self._should_exclude_retired_from_search_results():
@@ -461,18 +463,27 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
 
     def get_wildcard_search_criterion(self):
         search_string = self.get_search_string()
-        wildcard_search_string = self.get_wildcard_search_string()
         name_attr = 'name'
         if self.is_concept_document():
             name_attr = '_name'
 
-        return Q(
-            "wildcard", id=dict(value=search_string, boost=2)
-        ) | Q(
-            "wildcard", **{name_attr: dict(value=search_string, boost=5)}
-        ) | Q(
-            "query_string", query=wildcard_search_string
-        )
+        def get_query(_str):
+            return Q(
+                "wildcard", id=dict(value=_str, boost=2)
+            ) | Q(
+                "wildcard", **{name_attr: dict(value=_str, boost=5)}
+            ) | Q(
+                "query_string", query=self.get_wildcard_search_string(_str)
+            )
+
+        if not search_string:
+            return get_query(search_string)
+        words = search_string.split()
+        criterion = get_query(words[0])
+        for word in words[1:]:
+            criterion |= get_query(word)
+
+        return criterion
 
     def get_search_results_qs(self):
         if not self.should_perform_es_search():
@@ -563,9 +574,13 @@ class SourceChildExtrasBaseView:
         queryset = self.get_queryset()
 
         if 'concept_version' in self.kwargs or 'mapping_version' in self.kwargs:
-            return queryset.first()
+            instance = queryset.first()
+        else:
+            instance = queryset.filter(is_latest_version=True).first()
 
-        return queryset.filter(is_latest_version=True).first()
+        self.check_object_permissions(self.request, instance)
+
+        return instance
 
     def get_permissions(self):
         if self.request.method in ['GET', 'HEAD']:
@@ -615,13 +630,22 @@ class SourceChildExtraRetrieveUpdateDestroyView(SourceChildExtrasBaseView, Retri
         return Response(dict(detail=NOT_FOUND), status=status.HTTP_404_NOT_FOUND)
 
 
+class APIVersionView(APIView):
+    permission_classes = (AllowAny,)
+    swagger_schema = None
+
+    @staticmethod
+    def get(_):
+        return Response(__version__)
+
+
 class RootView(BaseAPIView):  # pragma: no cover
     permission_classes = (AllowAny,)
     serializer_class = RootSerializer
 
     def get(self, _):
         from core.urls import urlpatterns
-        data = dict(version='2.0.0.beta.1', routes={})
+        data = dict(version=__version__, routes={})
         for pattern in urlpatterns:
             name = getattr(pattern, 'name', None) or getattr(pattern, 'app_name', None)
             if name in ['admin']:

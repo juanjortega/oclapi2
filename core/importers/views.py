@@ -1,13 +1,16 @@
-import urllib
+import csv
+import io
 
+import requests
 from celery.result import AsyncResult
 from celery_once import AlreadyQueued, QueueOnce
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
+from ocldev.oclcsvtojsonconverter import OclStandardCsvToJsonConverter
 from pydash import get
 from rest_framework import status
-from rest_framework.parsers import MultiPartParser
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -16,8 +19,12 @@ from core.common.services import RedisService
 from core.common.swagger_parameters import update_if_exists_param, task_param, result_param, username_param, \
     file_upload_param, file_url_param, parallel_threads_param, verbose_param
 from core.common.utils import parse_bulk_import_task_id, task_exists, flower_get, queue_bulk_import, \
-    get_bulk_import_celery_once_lock_key
+    get_bulk_import_celery_once_lock_key, is_csv_file
 from core.importers.constants import ALREADY_QUEUED, INVALID_UPDATE_IF_EXISTS, NO_CONTENT_TO_IMPORT
+
+
+def csv_file_data_to_input_list(file_content):
+    return [row for row in csv.DictReader(io.StringIO(file_content))]  # pylint: disable=unnecessary-comprehension
 
 
 def import_response(request, import_queue, data, threads=None, inline=False):
@@ -60,7 +67,15 @@ class BulkImportFileUploadView(APIView):
         if not file:
             return Response(dict(exception=NO_CONTENT_TO_IMPORT), status=status.HTTP_400_BAD_REQUEST)
 
-        return import_response(self.request, import_queue, file.read())
+        if is_csv_file(name=file.name):
+            data = OclStandardCsvToJsonConverter(
+                input_list=csv_file_data_to_input_list(file.read().decode('utf-8')),
+                allow_special_characters=True
+            ).process()
+        else:
+            data = file.read()
+
+        return import_response(self.request, import_queue, data)
 
 
 class BulkImportFileURLView(APIView):
@@ -72,25 +87,26 @@ class BulkImportFileURLView(APIView):
     )
     def post(self, request, import_queue=None):
         file = None
+        file_url = request.data.get('file_url')
 
         try:
-            file = urllib.request.urlopen(request.data.get('file_url'))
+            file = requests.get(file_url)
         except:  # pylint: disable=bare-except
             pass
 
         if not file:
             return Response(dict(exception=NO_CONTENT_TO_IMPORT), status=status.HTTP_400_BAD_REQUEST)
 
-        return import_response(self.request, import_queue, file.read())
+        if is_csv_file(name=file_url):
+            data = OclStandardCsvToJsonConverter(
+                input_list=csv_file_data_to_input_list(file.text), allow_special_characters=True).process()
+        else:
+            data = file.text
+
+        return import_response(self.request, import_queue, data)
 
 
 class BulkImportView(APIView):
-    def get_permissions(self):
-        if self.request.method == 'DELETE':
-            return [IsAdminUser(), ]
-
-        return [IsAuthenticated(), ]
-
     @swagger_auto_schema(
         manual_parameters=[update_if_exists_param],
         request_body=openapi.Schema(type=openapi.TYPE_OBJECT)
@@ -187,17 +203,26 @@ class BulkImportView(APIView):
             ),
         }
     ))
-    def delete(request, import_queue=None):  # pylint: disable=unused-argument
+    def delete(request, _=None):  # pylint: disable=unused-argument
         task_id = request.data.get('task_id', None)
         signal = request.data.get('signal', None) or 'SIGKILL'
         if not task_id:
             return Response(status=status.HTTP_400_BAD_REQUEST)
 
+        result = AsyncResult(task_id)
+        user = request.user
+        if not user.is_staff:  # non-admin users should be able to cancel their own tasks
+            task_info = parse_bulk_import_task_id(task_id)
+            username = task_info.get('username', None)
+            if not username:
+                username = get(result, 'args.1')  # for parallel child tasks
+            if username != user.username:
+                return Response(status=status.HTTP_403_FORBIDDEN)
+
         try:
             app.control.revoke(task_id, terminate=True, signal=signal)
 
             # Below code is needed for removing the lock from QueueOnce
-            result = AsyncResult(task_id)
             if (get(result, 'name') or '').startswith('core.common.tasks.bulk_import'):
                 celery_once_key = get_bulk_import_celery_once_lock_key(result)
                 if celery_once_key:
@@ -212,7 +237,7 @@ class BulkImportView(APIView):
 
 class BulkImportParallelInlineView(APIView):  # pragma: no cover
     permission_classes = (IsAuthenticated, )
-    parser_classes = (MultiPartParser, )
+    parser_classes = (MultiPartParser, FormParser)
 
     @swagger_auto_schema(
         manual_parameters=[update_if_exists_param, file_url_param, file_upload_param, parallel_threads_param],
@@ -220,38 +245,76 @@ class BulkImportParallelInlineView(APIView):  # pragma: no cover
     def post(self, request, import_queue=None):
         parallel_threads = request.data.get('parallel') or 5
         file = None
+        file_name = None
+        is_upload = 'file' in request.data
+        is_file_url = 'file_url' in request.data
+        is_data = 'data' in request.data
+        file_content = None
         try:
-            if 'file' in request.data:
+            if is_upload:
                 file = request.data['file']
-            elif 'file_url' in request.data:
-                file = urllib.request.urlopen(request.data['file_url'])
+                file_name = file.name
+                file_content = file.read().decode('utf-8')
+            elif is_file_url:
+                file_name = request.data['file_url']
+                file = requests.get(file_name)
+                file_content = file.text
         except:  # pylint: disable=bare-except
             pass
 
-        if not file:
+        if not file_content and not is_data:
             return Response(dict(exception=NO_CONTENT_TO_IMPORT), status=status.HTTP_400_BAD_REQUEST)
 
-        return import_response(self.request, import_queue, file.read(), parallel_threads, True)
+        if file_name and is_csv_file(name=file_name):
+            data = OclStandardCsvToJsonConverter(
+                input_list=csv_file_data_to_input_list(file_content),
+                allow_special_characters=True
+            ).process()
+        elif file:
+            data = file_content
+        else:
+            data = request.data.get('data')
+
+        return import_response(self.request, import_queue, data, parallel_threads, True)
 
 
 class BulkImportInlineView(APIView):  # pragma: no cover
     permission_classes = (IsAuthenticated, )
-    parser_classes = (MultiPartParser, )
+    parser_classes = (MultiPartParser, FormParser)
 
     @swagger_auto_schema(
         manual_parameters=[update_if_exists_param, file_url_param, file_upload_param],
     )
     def post(self, request, import_queue=None):
         file = None
+        file_name = None
+        is_upload = 'file' in request.data
+        is_file_url = 'file_url' in request.data
+        is_data = 'data' in request.data
+        file_content = None
         try:
-            if 'file' in request.data:
+            if is_upload:
                 file = request.data['file']
-            elif 'file_url' in request.data:
-                file = urllib.request.urlopen(request.data['file_url'])
+                file_name = file.name
+                file_content = file.read().decode('utf-8')
+            elif is_file_url:
+                file_name = request.data['file_url']
+                file = requests.get(file_name)
+                file_content = file.text
         except:  # pylint: disable=bare-except
             pass
 
-        if not file:
+        if not file_content and not is_data:
             return Response(dict(exception=NO_CONTENT_TO_IMPORT), status=status.HTTP_400_BAD_REQUEST)
 
-        return import_response(self.request, import_queue, file.read(), None, True)
+        if file_name and is_csv_file(name=file_name):
+            data = OclStandardCsvToJsonConverter(
+                input_list=csv_file_data_to_input_list(file_content),
+                allow_special_characters=True
+            ).process()
+        elif file:
+            data = file_content
+        else:
+            data = request.data.get('data')
+
+        return import_response(self.request, import_queue, data, None, True)

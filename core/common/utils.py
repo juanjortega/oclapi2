@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import os
 import random
 import tempfile
@@ -42,7 +43,10 @@ def write_csv_to_s3(data, is_owner, **kwargs):  # pragma: no cover
         zip_file.write(csv_file.name)
 
     key = get_downloads_path(is_owner) + zip_file.filename
-    S3.upload_file(key=key, file_path=os.path.abspath(zip_file.filename), binary=True)
+    S3.upload_file(
+        key=key, file_path=os.path.abspath(zip_file.filename), binary=True,
+        metadata=dict(ContentType='application/zip'), headers={'content-type': 'application/zip'}
+    )
     os.chdir(cwd)
     return S3.url_for(key)
 
@@ -305,7 +309,10 @@ def write_export_file(
     logger.info('Done compressing.  Uploading...')
 
     s3_key = version.export_path
-    S3.upload_file(key=s3_key, file_path=file_path, binary=True)
+    S3.upload_file(
+        key=s3_key, file_path=file_path, binary=True, metadata=dict(ContentType='application/zip'),
+        headers={'content-type': 'application/zip'}
+    )
     uploaded_path = S3.url_for(s3_key)
     logger.info('Uploaded to %s.' % uploaded_path)
     os.chdir(cwd)
@@ -572,3 +579,41 @@ def get_bulk_import_celery_once_lock_key(async_result):
 
 def get_celery_once_lock_key(name, args):
     return queue_once_key(name, OrderedDict(args), None)
+
+
+def guess_extension(file=None, name=None):
+    if not file and not name:
+        return None
+    if file:
+        name = file.name
+    _, extension = os.path.splitext(name)
+
+    if not extension:
+        extension = mimetypes.guess_extension(name)
+    return extension
+
+
+def is_csv_file(file=None, name=None):
+    if not file and not name:
+        return None
+
+    extension = guess_extension(file=file, name=name)
+
+    return extension and extension.endswith('csv')
+
+
+def is_url_encoded_string(string, lower=True):
+    encoded_string = encode_string(decode_string(string))
+
+    if lower:
+        return string.lower() == encoded_string.lower()
+
+    return string == encoded_string
+
+
+def decode_string(string):
+    return parse.unquote(string)
+
+
+def encode_string(string, **kwargs):
+    return parse.quote_plus(string, **kwargs)
