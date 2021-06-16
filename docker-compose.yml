@@ -39,10 +39,10 @@ services:
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - API_INTERNAL_BASE_URL=${API_INTERNAL_BASE_URL-http://api:8000}
       - EMAIL_NOREPLY_PASSWORD
-      - AWS_ACCESS_KEY_ID
-      - AWS_SECRET_ACCESS_KEY
-      - AWS_STORAGE_BUCKET_NAME
-      - AWS_REGION_NAME
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID-AAAA}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY-AAAA}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME-AAAA}
+      - AWS_REGION_NAME=${AWS_REGION_NAME-AAAA}
     healthcheck:
       test: "curl --silent --fail http://localhost:8000/orgs/ || exit 1"
   celery:
@@ -56,9 +56,13 @@ services:
       - REDIS_PORT=${REDIS_PORT-6379}
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID-AAAA}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY-AAAA}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME-AAAA}
+      - AWS_REGION_NAME=${AWS_REGION_NAME-AAAA}
   celery_indexing:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
-    command: ["bash", "-c", "CELERY_WORKER_NAME=indexing ./start_celery_worker.sh -P prefork -Q indexing --autoscale=10,2"]
+    command: ["bash", "-c", "CELERY_WORKER_NAME=indexing ./start_celery_worker.sh -P prefork -Q indexing --autoscale=4,2"]
     restart: "always"
     healthcheck:
       test: ["CMD-SHELL", "-c", "CELERY_WORKER_NAME=indexing ./ping_celery_worker.sh"]
@@ -102,7 +106,7 @@ services:
       - DEBUG=${DEBUG-False}
   celery_bulk_import_root:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
-    command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_root ./start_celery_worker.sh -Q bulk_import_root -c 2"]
+    command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_root ./start_celery_worker.sh -Q bulk_import_root -c 1"]
     restart: "always"
     healthcheck:
       test:  ["CMD-SHELL", "-c", "CELERY_WORKER_NAME=bulk_import_root ./ping_celery_worker.sh"]
