@@ -1,12 +1,12 @@
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import UniqueConstraint
+from django.db.models import UniqueConstraint, F
 from django.urls import resolve
 from pydash import get, compact
 
 from core.common.constants import HEAD, ACCESS_TYPE_NONE
 from core.common.models import ConceptContainerModel
-from core.common.utils import reverse_resource, get_query_params_from_url_string
+from core.common.utils import get_query_params_from_url_string
 from core.concepts.models import LocalizedText
 from core.sources.constants import SOURCE_TYPE, SOURCE_VERSION_TYPE, HIERARCHY_ROOT_MUST_BELONG_TO_SAME_SOURCE, \
     HIERARCHY_MEANINGS
@@ -23,7 +23,7 @@ class Source(ConceptContainerModel):
         'owner_type': {'sortable': False, 'filterable': True, 'facet': True},
         'custom_validation_schema': {'sortable': False, 'filterable': True, 'facet': True},
         'canonical_url': {'sortable': True, 'filterable': True},
-        'experimental': {'sortable': False, 'filterable': False, 'facet': True},
+        'experimental': {'sortable': False, 'filterable': False, 'facet': False},
         'hierarchy_meaning': {'sortable': False, 'filterable': True, 'facet': True},
         'external_id': {'sortable': False, 'filterable': True, 'facet': False, 'exact': False},
     }
@@ -42,6 +42,8 @@ class Source(ConceptContainerModel):
                 condition=models.Q(organization=None),
             )
         ]
+        indexes = [] + ConceptContainerModel.Meta.indexes
+        # + index on UPPER(mnemonic) in custom migration 0022
 
     source_type = models.TextField(blank=True, null=True)
     content_type = models.TextField(blank=True, null=True)
@@ -87,10 +89,6 @@ class Source(ConceptContainerModel):
     @property
     def source(self):
         return self.mnemonic
-
-    @property
-    def versions_url(self):
-        return reverse_resource(self, 'source-version-list')
 
     def update_version_data(self, obj=None):
         super().update_version_data(obj)
@@ -149,3 +147,48 @@ class Source(ConceptContainerModel):
     def clean(self):
         if self.hierarchy_root_id and not self.is_hierarchy_root_belonging_to_self():
             raise ValidationError({'hierarchy_root': [HIERARCHY_ROOT_MUST_BELONG_TO_SAME_SOURCE]})
+
+    def get_parentless_concepts(self):
+        return self.concepts.filter(parent_concepts__isnull=True, id=F('versioned_object_id'))
+
+    def hierarchy(self, offset=0, limit=100):
+        from core.concepts.serializers import ConceptHierarchySerializer
+        hierarchy_root = None
+        if offset == 0:
+            hierarchy_root = self.hierarchy_root
+
+        parent_less_children = self.get_parentless_concepts()
+        if hierarchy_root:
+            parent_less_children = parent_less_children.exclude(mnemonic=hierarchy_root.mnemonic)
+
+        total_count = parent_less_children.count()
+        adjusted_limit = limit
+        if hierarchy_root:
+            adjusted_limit -= 1
+        parent_less_children = parent_less_children.order_by('mnemonic')[offset:limit+offset]
+        children = ConceptHierarchySerializer(compact(parent_less_children), many=True).data
+
+        if hierarchy_root:
+            children.append({**ConceptHierarchySerializer(hierarchy_root).data, 'root': True})
+
+        return dict(
+            id=self.mnemonic,
+            children=children,
+            count=total_count + (1 if hierarchy_root else 0),
+            offset=offset,
+            limit=limit
+        )
+
+    @property
+    def active_concepts(self):
+        queryset = self.concepts.filter(retired=False, is_active=True)
+        if self.is_head:
+            queryset = queryset.filter(is_latest_version=True)
+        return queryset.count()
+
+    @property
+    def active_mappings(self):
+        queryset = self.mappings.filter(retired=False, is_active=True)
+        if self.is_head:
+            queryset = queryset.filter(is_latest_version=True)
+        return queryset.count()

@@ -8,8 +8,10 @@ from pydash import get, compact
 from core.common.constants import ISO_639_1, INCLUDE_RETIRED_PARAM, LATEST, HEAD
 from core.common.mixins import SourceChildMixin
 from core.common.models import VersionedModel
-from core.common.tasks import process_hierarchy_for_new_concept, process_hierarchy_for_concept_version
-from core.common.utils import reverse_resource, parse_updated_since_param, generate_temp_version, drop_version
+from core.common.tasks import process_hierarchy_for_new_concept, process_hierarchy_for_concept_version, \
+    process_hierarchy_for_new_parent_concept_version
+from core.common.utils import parse_updated_since_param, generate_temp_version, drop_version, \
+    encode_string, decode_string
 from core.concepts.constants import CONCEPT_TYPE, LOCALES_FULLY_SPECIFIED, LOCALES_SHORT, LOCALES_SEARCH_INDEX_TERM, \
     CONCEPT_WAS_RETIRED, CONCEPT_IS_ALREADY_RETIRED, CONCEPT_IS_ALREADY_NOT_RETIRED, CONCEPT_WAS_UNRETIRED, \
     PERSIST_CLONE_ERROR, PERSIST_CLONE_SPECIFY_USER_ERROR, ALREADY_EXISTS, CONCEPT_REGEX
@@ -19,6 +21,13 @@ from core.concepts.mixins import ConceptValidationMixin
 class LocalizedText(models.Model):
     class Meta:
         db_table = 'localized_texts'
+
+        indexes = [
+            models.Index(fields=['name']),
+            models.Index(fields=['type']),
+            models.Index(fields=['locale']),
+            models.Index(fields=['locale_preferred']),
+        ]
 
     id = models.BigAutoField(primary_key=True)
     internal_reference_id = models.CharField(max_length=255, null=True, blank=True)
@@ -115,6 +124,7 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
     class Meta:
         db_table = 'concepts'
         unique_together = ('mnemonic', 'version', 'parent')
+        indexes = [] + VersionedModel.Meta.indexes
 
     external_id = models.TextField(null=True, blank=True)
     concept_class = models.TextField()
@@ -280,10 +290,6 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         return get(self, 'parent.custom_validation_schema')
 
     @property
-    def versions_url(self):
-        return reverse_resource(self, 'concept-version-list')
-
-    @property
     def all_names(self):
         return list(self.names.values_list('name', flat=True))
 
@@ -334,39 +340,25 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
                 return cls.objects.none()
 
         if collection:
-            mnemonic_criteria = cls.get_iexact_or_criteria('collection_set__mnemonic', collection)
-            if not container_version and not is_latest_released:
-                queryset = queryset.filter(mnemonic_criteria, collection_set__version=HEAD)
-            else:
-                queryset = queryset.filter(mnemonic_criteria)
-            if user:
-                queryset = queryset.filter(cls.get_iexact_or_criteria('collection_set__user__username', user))
-            if org:
-                queryset = queryset.filter(cls.get_iexact_or_criteria('collection_set__organization__mnemonic', org))
-            if is_latest_released:
-                queryset = queryset.filter(
-                    cls.get_iexact_or_criteria('collection_set__version', get(latest_released_version, 'version'))
+            queryset = queryset.filter(
+                cls.get_filter_by_container_criterion(
+                    'collection_set', collection, org, user, container_version,
+                    is_latest_released, latest_released_version,
                 )
-            if container_version and not is_latest_released:
-                queryset = queryset.filter(cls.get_iexact_or_criteria('collection_set__version', container_version))
+            )
         if source:
-            mnemonic_criteria = cls.get_iexact_or_criteria('sources__mnemonic', source)
-            if not container_version and not is_latest_released:
-                queryset = queryset.filter(mnemonic_criteria, sources__version=HEAD)
-            else:
-                queryset = queryset.filter(mnemonic_criteria)
-            if user:
-                queryset = queryset.filter(cls.get_iexact_or_criteria('parent__user__username', user))
-            if org:
-                queryset = queryset.filter(cls.get_iexact_or_criteria('parent__organization__mnemonic', org))
-            if is_latest_released:
-                queryset = queryset.filter(
-                    cls.get_iexact_or_criteria('sources__version', get(latest_released_version, 'version'))
+            queryset = queryset.filter(
+                cls.get_filter_by_container_criterion(
+                    'sources', source, org, user, container_version,
+                    is_latest_released, latest_released_version
                 )
-            if container_version and not is_latest_released:
-                queryset = queryset.filter(cls.get_iexact_or_criteria('sources__version', container_version))
+            )
+
         if concept:
-            queryset = queryset.filter(mnemonic__exact=concept)
+            mnemonics = [concept, encode_string(concept, safe=' '), encode_string(concept, safe='+'),
+                         encode_string(concept, safe='+%'), encode_string(concept, safe='% +'),
+                         decode_string(concept), decode_string(concept, False)]
+            queryset = queryset.filter(mnemonic__in=mnemonics)
         if concept_version:
             queryset = queryset.filter(cls.get_iexact_or_criteria('version', concept_version))
         if is_latest:
@@ -425,7 +417,7 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         return initial_version
 
     @classmethod
-    def create_new_version_for(cls, instance, data, user, create_parent_version=True):
+    def create_new_version_for(cls, instance, data, user, create_parent_version=True, add_prev_version_children=True):  # pylint: disable=too-many-arguments
         instance.concept_class = data.get('concept_class', instance.concept_class)
         instance.datatype = data.get('datatype', instance.datatype)
         instance.extras = data.get('extras', instance.extras)
@@ -444,7 +436,7 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         if not parent_concept_uris and has_parent_concept_uris_attr:
             parent_concept_uris = []
 
-        return cls.persist_clone(instance, user, create_parent_version, parent_concept_uris)
+        return cls.persist_clone(instance, user, create_parent_version, parent_concept_uris, add_prev_version_children)
 
     def set_parent_concepts_from_uris(self, create_parent_version=True):
         parent_concepts = get(self, '_parent_concepts', None)
@@ -486,7 +478,8 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
                         parent_concept_urls=concept.parent_concept_urls
                     ),
                     concept.created_by,
-                    create_parent_version=False
+                    create_parent_version=False,
+                    add_prev_version_children=False
                 )
                 new_latest_version = concept.get_latest_version()
                 for uri in current_latest_version.child_concept_urls:
@@ -529,7 +522,7 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         return self.parent.concepts_set.filter(mnemonic__exact=self.mnemonic).exists()
 
     @classmethod
-    def persist_new(cls, data, user=None, create_initial_version=True):
+    def persist_new(cls, data, user=None, create_initial_version=True, create_parent_version=True):
         names = [
             name if isinstance(name, LocalizedText) else LocalizedText.build(
                 name
@@ -575,9 +568,11 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
             concept.update_mappings()
             if parent_concept_uris:
                 if get(settings, 'TEST_MODE', False):
-                    process_hierarchy_for_new_concept(concept.id, get(initial_version, 'id'), parent_concept_uris)
+                    process_hierarchy_for_new_concept(
+                        concept.id, get(initial_version, 'id'), parent_concept_uris, create_parent_version)
                 else:
-                    process_hierarchy_for_new_concept.delay(concept.id, get(initial_version, 'id'), parent_concept_uris)
+                    process_hierarchy_for_new_concept.delay(
+                        concept.id, get(initial_version, 'id'), parent_concept_uris, create_parent_version)
         except ValidationError as ex:
             concept.errors.update(ex.message_dict)
         except IntegrityError as ex:
@@ -598,7 +593,10 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         concept.save()
 
     @classmethod
-    def persist_clone(cls, obj, user=None, create_parent_version=True, parent_concept_uris=None, **kwargs):  # pylint: disable=too-many-statements
+    def persist_clone(
+            cls, obj, user=None, create_parent_version=True, parent_concept_uris=None, add_prev_version_children=True,
+            **kwargs
+    ):  # pylint: disable=too-many-statements,too-many-branches,too-many-arguments
         errors = dict()
         if not user:
             errors['version_created_by'] = PERSIST_CLONE_SPECIFY_USER_ERROR
@@ -626,6 +624,11 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
                     if prev_latest_version:
                         prev_latest_version.is_latest_version = False
                         prev_latest_version.save()
+                        if add_prev_version_children:
+                            if get(settings, 'TEST_MODE', False):
+                                process_hierarchy_for_new_parent_concept_version(prev_latest_version.id, obj.id)
+                            else:
+                                process_hierarchy_for_new_parent_concept_version.delay(prev_latest_version.id, obj.id)
 
                     obj.sources.set(compact([parent, parent_head]))
                     persisted = True
@@ -659,6 +662,20 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
 
         return errors
 
+    def get_unidirectional_mappings_for_collection(self, collection_url, collection_version=HEAD):
+        from core.mappings.models import Mapping
+        return Mapping.objects.filter(
+            from_concept__uri__icontains=drop_version(self.uri), collection_set__uri__icontains=collection_url,
+            collection_set__version=collection_version
+        )
+
+    def get_indirect_mappings_for_collection(self, collection_url, collection_version=HEAD):
+        from core.mappings.models import Mapping
+        return Mapping.objects.filter(
+            to_concept__uri__icontains=drop_version(self.uri), collection_set__uri__icontains=collection_url,
+            collection_set__version=collection_version
+        )
+
     def get_unidirectional_mappings(self):
         return self.__get_mappings_from_relation('mappings_from')
 
@@ -687,6 +704,15 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
 
     def get_bidirectional_mappings(self):
         queryset = self.get_unidirectional_mappings() | self.get_indirect_mappings()
+
+        return queryset.distinct()
+
+    def get_bidirectional_mappings_for_collection(self, collection_url, collection_version=HEAD):
+        queryset = self.get_unidirectional_mappings_for_collection(
+            collection_url, collection_version
+        ) | self.get_indirect_mappings_for_collection(
+            collection_url, collection_version
+        )
 
         return queryset.distinct()
 
@@ -738,6 +764,22 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
             queryset |= self.get_latest_version().child_concepts.all()
         return self.__format_hierarchy_uris(queryset.values_list('uri', flat=True))
 
+    def child_concept_queryset(self):
+        urls = self.child_concept_urls
+        if urls:
+            return Concept.objects.filter(uri__in=urls)
+        return Concept.objects.none()
+
     @staticmethod
     def __format_hierarchy_uris(uris):
         return list({drop_version(uri) for uri in uris})
+
+    def get_hierarchy_path(self):
+        result = []
+        parent_concept = self.parent_concepts.first()
+        while parent_concept is not None:
+            result.append(drop_version(parent_concept.uri))
+            parent_concept = parent_concept.parent_concepts.first()
+
+        result.reverse()
+        return result

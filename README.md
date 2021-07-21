@@ -12,9 +12,6 @@ The new and improved OCL terminology service v2
 2. Coverage -- `docker exec -it oclapi2_api_1 bash coverage.sh`
 2. Tests --- `docker exec -it oclapi2_api_1  python manage.py test --keepdb -v3`
 
-
-
-
 ### Build image
 
 #### Crear archivo .env
@@ -44,3 +41,17 @@ docker rmi openconceptlab/oclapi2:production
 
 
 
+### Release
+
+Every build is a candidate for release.
+
+In order to release please trigger the release build step in [our CI](https://ci.openmrs.org/browse/OCL-OCLAPI2/latest). Please note
+that the maintenance version will be automatically increased after a successful release. It is desired only, if you are releasing the latest build and
+should be turned off by setting the increaseMaintenanceRelease variable to false on the Run stage "Release" popup in other cases.
+
+A deployment release will be automatically created and pushed to the staging environment.
+
+### Deployment
+
+In order to deploy please trigger the deployment [here](https://ci.openmrs.org/deploy/viewDeploymentProjectEnvironments.action?id=205619201).
+Please use an existing deployment release.

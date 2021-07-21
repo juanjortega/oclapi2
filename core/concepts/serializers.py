@@ -4,8 +4,11 @@ from rest_framework.fields import CharField, DateTimeField, BooleanField, URLFie
 from rest_framework.serializers import ModelSerializer
 
 from core.common.constants import INCLUDE_INVERSE_MAPPINGS_PARAM, INCLUDE_MAPPINGS_PARAM, INCLUDE_EXTRAS_PARAM, \
-    INCLUDE_PARENT_CONCEPTS, INCLUDE_CHILD_CONCEPTS, INCLUDE_SOURCE_VERSIONS, INCLUDE_COLLECTION_VERSIONS
+    INCLUDE_PARENT_CONCEPTS, INCLUDE_CHILD_CONCEPTS, INCLUDE_SOURCE_VERSIONS, INCLUDE_COLLECTION_VERSIONS, \
+    CREATE_PARENT_VERSION_QUERY_PARAM, INCLUDE_HIERARCHY_PATH, INCLUDE_PARENT_CONCEPT_URLS, \
+    INCLUDE_CHILD_CONCEPT_URLS, HEAD
 from core.common.fields import EncodedDecodedCharField
+from core.common.utils import to_parent_uri_from_kwargs
 from core.concepts.models import Concept, LocalizedText
 
 
@@ -104,7 +107,7 @@ class ConceptListSerializer(ModelSerializer):
     source = CharField(source='parent_resource')
     owner = CharField(source='owner_name')
     update_comment = CharField(source='comment', required=False, allow_null=True, allow_blank=True)
-    locale = SerializerMethodField()
+    locale = CharField(source='iso_639_1_locale', read_only=True)
     url = CharField(required=False, source='versioned_object_url')
     version_created_on = DateTimeField(source='created_at', read_only=True)
     version_created_by = DateTimeField(source='created_by.username', read_only=True)
@@ -112,6 +115,7 @@ class ConceptListSerializer(ModelSerializer):
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
+        self.view_kwargs = get(kwargs, 'context.view.kwargs', dict())
         self.query_params = params.dict() if params else dict()
         self.include_indirect_mappings = self.query_params.get(INCLUDE_INVERSE_MAPPINGS_PARAM) in ['true', True]
         self.include_direct_mappings = self.query_params.get(INCLUDE_MAPPINGS_PARAM) in ['true', True]
@@ -134,17 +138,21 @@ class ConceptListSerializer(ModelSerializer):
             'version_url', 'extras',
         )
 
-    @staticmethod
-    def get_locale(obj):
-        return obj.iso_639_1_locale
-
     def get_mappings(self, obj):
         from core.mappings.serializers import MappingDetailSerializer
         context = get(self, 'context')
-        if self.include_direct_mappings:
-            return MappingDetailSerializer(obj.get_unidirectional_mappings(), many=True, context=context).data
+        is_collection = 'collection' in self.view_kwargs
+        collection_version = self.view_kwargs.get('version', HEAD) if is_collection else None
+        parent_uri = to_parent_uri_from_kwargs(self.view_kwargs) if is_collection else None
         if self.include_indirect_mappings:
-            return MappingDetailSerializer(obj.get_bidirectional_mappings(), many=True, context=context).data
+            mappings = obj.get_bidirectional_mappings_for_collection(
+                parent_uri, collection_version
+            ) if is_collection else obj.get_bidirectional_mappings()
+            return MappingDetailSerializer(mappings, many=True, context=context).data
+        if self.include_direct_mappings:
+            mappings = obj.get_unidirectional_mappings_for_collection(
+                parent_uri, collection_version) if is_collection else obj.get_unidirectional_mappings()
+            return MappingDetailSerializer(mappings, many=True, context=context).data
 
         return []
 
@@ -207,20 +215,34 @@ class ConceptDetailSerializer(ModelSerializer):
     mappings = SerializerMethodField()
     parent_concepts = SerializerMethodField()
     child_concepts = SerializerMethodField()
+    hierarchy_path = SerializerMethodField()
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
+        self.view_kwargs = get(kwargs, 'context.view.kwargs', dict())
+
         self.query_params = params.dict() if params else dict()
         self.include_indirect_mappings = self.query_params.get(INCLUDE_INVERSE_MAPPINGS_PARAM) in ['true', True]
         self.include_direct_mappings = self.query_params.get(INCLUDE_MAPPINGS_PARAM) in ['true', True]
+        self.include_parent_concept_urls = self.query_params.get(INCLUDE_PARENT_CONCEPT_URLS) in ['true', True]
+        self.include_child_concept_urls = self.query_params.get(INCLUDE_CHILD_CONCEPT_URLS) in ['true', True]
         self.include_parent_concepts = self.query_params.get(INCLUDE_PARENT_CONCEPTS) in ['true', True]
         self.include_child_concepts = self.query_params.get(INCLUDE_CHILD_CONCEPTS) in ['true', True]
+        self.include_hierarchy_path = self.query_params.get(INCLUDE_HIERARCHY_PATH) in ['true', True]
+        if CREATE_PARENT_VERSION_QUERY_PARAM in self.query_params:
+            self.create_parent_version = self.query_params.get(CREATE_PARENT_VERSION_QUERY_PARAM) in ['true', True]
+        else:
+            self.create_parent_version = True
 
         try:
             if not self.include_parent_concepts:
                 self.fields.pop('parent_concepts', None)
             if not self.include_child_concepts:
                 self.fields.pop('child_concepts', None)
+            if not self.include_child_concept_urls:
+                self.fields.pop('child_concept_urls')
+            if not self.include_parent_concept_urls:
+                self.fields.pop('parent_concept_urls')
         except:  # pylint: disable=bare-except
             pass
 
@@ -233,27 +255,41 @@ class ConceptDetailSerializer(ModelSerializer):
             'owner', 'owner_type', 'owner_url', 'display_name', 'display_locale', 'names', 'descriptions',
             'created_on', 'updated_on', 'versions_url', 'version', 'extras', 'parent_id', 'name', 'type',
             'update_comment', 'version_url', 'mappings', 'updated_by', 'created_by', 'internal_reference_id',
-            'parent_concept_urls', 'child_concept_urls', 'parent_concepts', 'child_concepts'
+            'parent_concept_urls', 'child_concept_urls', 'parent_concepts', 'child_concepts', 'hierarchy_path'
         )
 
     def get_mappings(self, obj):
         from core.mappings.serializers import MappingDetailSerializer
         context = get(self, 'context')
+        is_collection = 'collection' in self.view_kwargs
+        collection_version = self.view_kwargs.get('version', HEAD) if is_collection else None
+        parent_uri = to_parent_uri_from_kwargs(self.view_kwargs) if is_collection else None
         if self.include_indirect_mappings:
-            return MappingDetailSerializer(obj.get_bidirectional_mappings(), many=True, context=context).data
+            mappings = obj.get_bidirectional_mappings_for_collection(
+                parent_uri, collection_version
+            ) if is_collection else obj.get_bidirectional_mappings()
+            return MappingDetailSerializer(mappings, many=True, context=context).data
         if self.include_direct_mappings:
-            return MappingDetailSerializer(obj.get_unidirectional_mappings(), many=True, context=context).data
+            mappings = obj.get_unidirectional_mappings_for_collection(
+                parent_uri, collection_version) if is_collection else obj.get_unidirectional_mappings()
+            return MappingDetailSerializer(mappings, many=True, context=context).data
 
         return []
 
     def create(self, validated_data):
-        concept = Concept.persist_new(data=validated_data, user=self.context.get('request').user)
+        concept = Concept.persist_new(
+            data=validated_data, user=self.context.get('request').user,
+            create_parent_version=self.create_parent_version
+        )
         if concept.errors:
             self._errors.update(concept.errors)
         return concept
 
     def update(self, instance, validated_data):
-        errors = Concept.create_new_version_for(instance, validated_data, self.context.get('request').user)
+        errors = Concept.create_new_version_for(
+            instance=instance, data=validated_data, user=self.context.get('request').user,
+            create_parent_version=self.create_parent_version
+        )
         if errors:
             self._errors.update(errors)
         return instance
@@ -266,6 +302,11 @@ class ConceptDetailSerializer(ModelSerializer):
     def get_parent_concepts(self, obj):
         if self.include_parent_concepts:
             return ConceptDetailSerializer(obj.parent_concepts.all(), many=True).data
+        return None
+
+    def get_hierarchy_path(self, obj):
+        if self.include_hierarchy_path:
+            return obj.get_hierarchy_path()
         return None
 
 
@@ -296,6 +337,7 @@ class ConceptVersionDetailSerializer(ModelSerializer):
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
+        self.view_kwargs = get(kwargs, 'context.view.kwargs', dict())
 
         self.include_indirect_mappings = False
         self.include_direct_mappings = False
@@ -304,12 +346,18 @@ class ConceptVersionDetailSerializer(ModelSerializer):
         self.include_direct_mappings = self.query_params.get(INCLUDE_MAPPINGS_PARAM) == 'true'
         self.include_parent_concepts = self.query_params.get(INCLUDE_PARENT_CONCEPTS) in ['true', True]
         self.include_child_concepts = self.query_params.get(INCLUDE_CHILD_CONCEPTS) in ['true', True]
+        self.include_parent_concept_urls = self.query_params.get(INCLUDE_PARENT_CONCEPT_URLS) in ['true', True]
+        self.include_child_concept_urls = self.query_params.get(INCLUDE_CHILD_CONCEPT_URLS) in ['true', True]
 
         try:
             if not self.include_parent_concepts:
                 self.fields.pop('parent_concepts', None)
             if not self.include_child_concepts:
                 self.fields.pop('child_concepts', None)
+            if not self.include_child_concept_urls:
+                self.fields.pop('child_concept_urls')
+            if not self.include_parent_concept_urls:
+                self.fields.pop('parent_concept_urls')
         except:  # pylint: disable=bare-except
             pass
 
@@ -329,10 +377,18 @@ class ConceptVersionDetailSerializer(ModelSerializer):
     def get_mappings(self, obj):
         from core.mappings.serializers import MappingDetailSerializer
         context = get(self, 'context')
-        if self.include_direct_mappings:
-            return MappingDetailSerializer(obj.get_unidirectional_mappings(), many=True, context=context).data
+        is_collection = 'collection' in self.view_kwargs
+        collection_version = self.view_kwargs.get('version', HEAD) if is_collection else None
+        parent_uri = to_parent_uri_from_kwargs(self.view_kwargs) if is_collection else None
         if self.include_indirect_mappings:
-            return MappingDetailSerializer(obj.get_bidirectional_mappings(), many=True, context=context).data
+            mappings = obj.get_bidirectional_mappings_for_collection(
+                parent_uri, collection_version
+            ) if is_collection else obj.get_bidirectional_mappings()
+            return MappingDetailSerializer(mappings, many=True, context=context).data
+        if self.include_direct_mappings:
+            mappings = obj.get_unidirectional_mappings_for_collection(
+                parent_uri, collection_version) if is_collection else obj.get_unidirectional_mappings()
+            return MappingDetailSerializer(mappings, many=True, context=context).data
 
         return []
 
@@ -345,3 +401,15 @@ class ConceptVersionDetailSerializer(ModelSerializer):
         if self.include_parent_concepts:
             return ConceptDetailSerializer(obj.parent_concepts.all(), many=True).data
         return None
+
+
+class ConceptHierarchySerializer(ModelSerializer):
+    uuid = CharField(source='id')
+    id = EncodedDecodedCharField(source='mnemonic')
+    url = CharField(source='uri')
+    children = ListField(source='child_concept_urls')
+    name = CharField(source='display_name')
+
+    class Meta:
+        model = Concept
+        fields = ('uuid', 'id', 'url', 'children', 'name')

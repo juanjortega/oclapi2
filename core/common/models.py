@@ -8,6 +8,7 @@ from django.db import models, IntegrityError
 from django.db.models import Value, Q
 from django.db.models.expressions import CombinedExpression, F
 from django.utils import timezone
+from django.utils.functional import cached_property
 from django_elasticsearch_dsl.registries import registry
 from django_elasticsearch_dsl.signals import RealTimeSignalProcessor
 from pydash import get
@@ -31,6 +32,13 @@ class BaseModel(models.Model):
     """
     class Meta:
         abstract = True
+        indexes = [
+            models.Index(fields=['uri']),
+            models.Index(fields=['-updated_at']),
+            models.Index(fields=['-created_at']),
+            models.Index(fields=['is_active']),
+            models.Index(fields=['public_access'])
+        ]
 
     id = models.BigAutoField(primary_key=True)
     internal_reference_id = models.CharField(max_length=255, null=True, blank=True)
@@ -203,6 +211,9 @@ class BaseResourceModel(BaseModel, CommonLogoModel):
 
     class Meta:
         abstract = True
+        indexes = [
+            models.Index(fields=['mnemonic']),
+        ] + BaseModel.Meta.indexes
 
     def __str__(self):
         return str(self.mnemonic)
@@ -224,6 +235,11 @@ class VersionedModel(BaseResourceModel):
 
     class Meta:
         abstract = True
+        indexes = [
+            models.Index(fields=['version']),
+            models.Index(fields=['retired']),
+            models.Index(fields=['is_latest_version']),
+        ] + BaseResourceModel.Meta.indexes
 
     @property
     def is_versioned(self):
@@ -297,6 +313,10 @@ class VersionedModel(BaseResourceModel):
             return self.get_resource_url_kwarg()
         return self.get_version_url_kwarg()
 
+    @property
+    def versions_url(self):
+        return drop_version(self.uri) + 'versions/'
+
 
 class ConceptContainerModel(VersionedModel):
     """
@@ -326,6 +346,7 @@ class ConceptContainerModel(VersionedModel):
 
     class Meta:
         abstract = True
+        indexes = [] + VersionedModel.Meta.indexes
 
     @property
     def is_openmrs_schema(self):
@@ -333,11 +354,11 @@ class ConceptContainerModel(VersionedModel):
 
     @property
     def active_concepts(self):
-        return self.concepts.filter(retired=False, is_active=True).distinct('versioned_object_id').count()
+        return self.concepts.filter(retired=False, is_active=True).count()
 
     @property
     def active_mappings(self):
-        return self.mappings.filter(retired=False, is_active=True).distinct('versioned_object_id').count()
+        return self.mappings.filter(retired=False, is_active=True).count()
 
     @property
     def last_concept_update(self):
@@ -703,7 +724,7 @@ class ConceptContainerModel(VersionedModel):
 
         return False
 
-    @property
+    @cached_property
     def export_path(self):
         last_update = self.last_child_update.strftime('%Y%m%d%H%M%S')
         return self.generic_export_path(suffix="{}.zip".format(last_update))
