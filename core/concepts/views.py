@@ -5,7 +5,7 @@ from drf_yasg.utils import swagger_auto_schema
 from pydash import get
 from rest_framework import status
 from rest_framework.generics import RetrieveAPIView, DestroyAPIView, ListCreateAPIView, RetrieveUpdateDestroyAPIView, \
-    UpdateAPIView
+    UpdateAPIView, ListAPIView
 from rest_framework.mixins import CreateModelMixin
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAdminUser
 from rest_framework.response import Response
@@ -18,6 +18,7 @@ from core.common.swagger_parameters import (
     q_param, limit_param, sort_desc_param, page_param, exact_match_param, sort_asc_param, verbose_param,
     include_facets_header, updated_since_param, include_inverse_mappings_param, include_retired_param,
     compress_header, include_source_versions_param, include_collection_versions_param)
+from core.common.utils import to_parent_uri_from_kwargs
 from core.common.views import SourceChildCommonBaseView, SourceChildExtrasView, \
     SourceChildExtraRetrieveUpdateDestroyView
 from core.concepts.constants import PARENT_VERSION_NOT_LATEST_CANNOT_UPDATE_CONCEPT
@@ -28,7 +29,7 @@ from core.concepts.search import ConceptSearch
 from core.concepts.serializers import (
     ConceptDetailSerializer, ConceptListSerializer, ConceptDescriptionSerializer, ConceptNameSerializer,
     ConceptVersionDetailSerializer,
-    ConceptVersionListSerializer)
+    ConceptVersionListSerializer, ConceptHierarchySerializer)
 from core.mappings.serializers import MappingListSerializer
 
 
@@ -88,7 +89,8 @@ class ConceptListView(ConceptBaseView, ListWithHeadersMixin, CreateModelMixin):
         return ConceptListSerializer
 
     def get_queryset(self):
-        is_latest_version = 'collection' not in self.kwargs and 'version' not in self.kwargs
+        is_latest_version = 'collection' not in self.kwargs and 'version' not in self.kwargs or \
+                            get(self.kwargs, 'version') == HEAD
         queryset = super().get_queryset()
         if is_latest_version:
             queryset = queryset.filter(is_latest_version=True)
@@ -207,6 +209,15 @@ class ConceptRetrieveUpdateDestroyView(ConceptBaseView, RetrieveAPIView, UpdateA
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class ConceptChildrenView(ConceptBaseView, ListAPIView):
+    serializer_class = ConceptHierarchySerializer
+
+    def get_queryset(self):
+        instance = get_object_or_404(super().get_queryset(), id=F('versioned_object_id'))
+        self.check_object_permissions(self.request, instance)
+        return instance.child_concept_queryset()
+
+
 class ConceptReactivateView(ConceptBaseView, UpdateAPIView):
     serializer_class = ConceptDetailSerializer
 
@@ -261,10 +272,16 @@ class ConceptMappingsView(ConceptBaseView, ListWithHeadersMixin):
         self.check_object_permissions(self.request, concept)
         include_retired = self.request.query_params.get(INCLUDE_RETIRED_PARAM, False)
         include_indirect_mappings = self.request.query_params.get(INCLUDE_INVERSE_MAPPINGS_PARAM, 'false') == 'true'
+        is_collection = 'collection' in self.kwargs
+        collection_version = self.kwargs.get('version', HEAD) if is_collection else None
+        parent_uri = to_parent_uri_from_kwargs(self.kwargs) if is_collection else None
         if include_indirect_mappings:
-            mappings_queryset = concept.get_bidirectional_mappings()
+            mappings_queryset = concept.get_bidirectional_mappings_for_collection(
+                parent_uri, collection_version
+            ) if is_collection else concept.get_bidirectional_mappings()
         else:
-            mappings_queryset = concept.get_unidirectional_mappings()
+            mappings_queryset = concept.get_unidirectional_mappings_for_collection(
+                parent_uri, collection_version) if is_collection else concept.get_unidirectional_mappings()
 
         if not include_retired:
             mappings_queryset = mappings_queryset.exclude(retired=True)

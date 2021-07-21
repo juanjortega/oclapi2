@@ -2,9 +2,11 @@ import base64
 import urllib.parse
 from email.mime.image import MIMEImage
 
+import markdown
+import requests
 from django.conf import settings
 from django.core.mail import EmailMessage
-from django.http import Http404
+from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
@@ -16,6 +18,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core import __version__
 from core.common.constants import SEARCH_PARAM, LIST_DEFAULT_LIMIT, CSV_DEFAULT_LIMIT, \
     LIMIT_PARAM, NOT_FOUND, MUST_SPECIFY_EXTRA_PARAM_IN_BODY, INCLUDE_RETIRED_PARAM, VERBOSE_PARAM, HEAD, LATEST
 from core.common.mixins import PathWalkerMixin
@@ -25,7 +28,6 @@ from core.common.utils import compact_dict_by_values, to_snake_case, to_camel_ca
 from core.concepts.permissions import CanViewParentDictionary, CanEditParentDictionary
 from core.orgs.constants import ORG_OBJECT_TYPE
 from core.users.constants import USER_OBJECT_TYPE
-from core import __version__
 
 
 class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
@@ -42,6 +44,7 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
     default_filters = dict(is_active=True)
     sort_asc_param = 'sortAsc'
     sort_desc_param = 'sortDesc'
+    sort_param = 'sort'
     default_qs_sort_attr = '-updated_at'
     exact_match = 'exact_match'
     facet_class = None
@@ -107,13 +110,17 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
     def get_sort_and_desc(self):
         query_params = self.request.query_params.dict()
 
-        sort_field = query_params.get(self.sort_desc_param)
-        if sort_field is not None:
-            return sort_field, True
+        sort_fields = query_params.get(self.sort_desc_param)
+        if sort_fields is not None:
+            return sort_fields, True
 
-        sort_field = query_params.get(self.sort_asc_param)
-        if sort_field is not None:
-            return sort_field, False
+        sort_fields = query_params.get(self.sort_asc_param)
+        if sort_fields is not None:
+            return sort_fields, False
+
+        sort_fields = query_params.get(self.sort_param)
+        if sort_fields is not None:
+            return sort_fields, None
 
         return None, None
 
@@ -129,14 +136,6 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
     def is_exact_match_on(self):
         return self.request.query_params.dict().get(self.exact_match, None) == 'on'
 
-    def get_default_sort(self):
-        for field in self.es_fields:
-            attrs = self.es_fields[field]
-            if 'sortable' in attrs and 'default' in attrs:
-                prefix = '-' if attrs['default'] == 'desc' else ''
-                return prefix + field
-        return None
-
     def get_searchable_fields(self):
         return [field for field, config in get(self, 'es_fields', dict()).items() if config.get('filterable', False)]
 
@@ -145,7 +144,8 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
 
     def get_search_string(self, lower=True):
         search_str = self.request.query_params.dict().get(SEARCH_PARAM, '').strip()
-        search_str = search_str.replace('-', '_')
+        if self.is_concept_document():
+            search_str = search_str.replace('-', '_')
         if lower:
             search_str = search_str.lower()
             search_str = search_str if is_url_encoded_string(search_str) else urllib.parse.quote_plus(search_str)
@@ -155,20 +155,35 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
     def get_wildcard_search_string(self, _str):
         return "*{}*".format(_str or self.get_search_string())
 
-    def get_sort_attr(self):
-        sort_field, desc = self.get_sort_and_desc()
-        if sort_field and sort_field.lower() in ['score', '_score', 'best match']:
-            return dict(_score=dict(order="desc" if desc else "asc"))
+    @staticmethod
+    def __get_order_by(is_desc):
+        return dict(order='desc') if is_desc else dict(order='asc')
 
-        if self.is_concept_document() and sort_field == 'name':
-            sort_field = '_name'
+    def get_sort_attributes(self):
+        sort_fields, desc = self.get_sort_and_desc()
+        result = []
+        if sort_fields:
+            order_by = None if desc is None else self.__get_order_by(desc)
+            fields = sort_fields.lower().split(',')
+            for field in fields.copy():
+                field = field.strip()
+                is_desc = field.startswith('-')
+                field = field.replace('-', '', 1) if is_desc else field
+                order_details = order_by
+                if order_details is None:
+                    order_details = self.__get_order_by(is_desc)
 
-        if self.is_valid_sort(sort_field):
-            if desc:
-                sort_field = '-' + sort_field
-            return sort_field
+                current_result = None
+                if field in ['score', '_score', 'best_match', 'best match']:
+                    current_result = dict(_score=order_details)
+                if self.is_concept_document() and field == 'name':
+                    current_result = dict(_name=order_details)
+                if self.is_valid_sort(field):
+                    current_result = {field: order_details}
+                if current_result is not None:
+                    result.append(current_result)
 
-        return dict(_score=dict(order="desc"))
+        return result
 
     def get_exact_search_criterion(self):
         search_str = self.get_search_string(False)
@@ -455,9 +470,11 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
             for key, value in kwargs_filters.items():
                 results = results.query('match', **{to_snake_case(key): value})
 
-            sort_field = self.get_sort_attr()
-            if sort_field:
-                results = results.sort(sort_field)
+            sort_by = self.get_sort_attributes()
+            if sort_by:
+                results = results.sort(*sort_by)
+            else:
+                results = results.sort(dict(_score=dict(order="desc")))
 
         return results
 
@@ -512,10 +529,9 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         else:
             result = SEARCH_PARAM in self.request.query_params
 
-        sort_field, _ = self.get_sort_and_desc()
         return result or self.has_searchable_extras_fields() or bool(
             self.get_faceted_filters()
-        ) or self.is_valid_sort(sort_field)
+        ) or len(self.get_sort_attributes()) > 0
 
     def has_searchable_extras_fields(self):
         return bool(
@@ -637,6 +653,16 @@ class APIVersionView(APIView):
     @staticmethod
     def get(_):
         return Response(__version__)
+
+
+class ChangeLogView(APIView):
+    permission_classes = (AllowAny, )
+    swagger_schema = None
+
+    @staticmethod
+    def get(_):
+        resp = requests.get('https://raw.githubusercontent.com/OpenConceptLab/oclapi2/master/changelog.md')
+        return HttpResponse(markdown.markdown(resp.text), content_type="text/html")
 
 
 class RootView(BaseAPIView):  # pragma: no cover
