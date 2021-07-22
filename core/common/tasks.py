@@ -299,7 +299,7 @@ def update_validation_schema(instance_type, instance_id, target_schema):
     ignore_result=True, autoretry_for=(Exception, WorkerLostError, ), retry_kwargs={'max_retries': 2, 'countdown': 2},
     acks_late=True, reject_on_worker_lost=True
 )
-def process_hierarchy_for_new_concept(concept_id, initial_version_id, parent_concept_uris):
+def process_hierarchy_for_new_concept(concept_id, initial_version_id, parent_concept_uris, create_parent_version=True):
     from core.concepts.models import Concept
     concept = Concept.objects.filter(id=concept_id).first()
 
@@ -309,7 +309,7 @@ def process_hierarchy_for_new_concept(concept_id, initial_version_id, parent_con
 
     parent_concepts = Concept.objects.filter(uri__in=parent_concept_uris)
     concept._parent_concepts = parent_concepts  # pylint: disable=protected-access
-    concept.set_parent_concepts_from_uris(create_parent_version=True)
+    concept.set_parent_concepts_from_uris(create_parent_version=create_parent_version)
 
     if initial_version:
         initial_version._parent_concepts = parent_concepts  # pylint: disable=protected-access
@@ -342,3 +342,16 @@ def process_hierarchy_for_concept_version(
             url for url in old_parents if url not in list(latest_version.parent_concept_urls)
         ]
         latest_version.create_new_versions_for_removed_parents(removed_parent_urls)
+
+
+@app.task(
+    ignore_result=True, autoretry_for=(Exception, WorkerLostError, ), retry_kwargs={'max_retries': 2, 'countdown': 2},
+    acks_late=True, reject_on_worker_lost=True
+)
+def process_hierarchy_for_new_parent_concept_version(prev_version_id, latest_version_id):
+    from core.concepts.models import Concept
+    prev_version = Concept.objects.filter(id=prev_version_id).first()
+    latest_version = Concept.objects.filter(id=latest_version_id).first()
+    if prev_version and latest_version:
+        for concept in Concept.objects.filter(parent_concepts__uri=prev_version.uri):
+            concept.parent_concepts.add(latest_version)

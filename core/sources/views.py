@@ -371,6 +371,27 @@ class SourceVersionExportView(ConceptContainerExportMixin, SourceVersionBaseView
             return status.HTTP_409_CONFLICT
 
 
+class SourceHierarchyView(SourceBaseView, RetrieveAPIView):
+    serializer_class = SourceSummaryDetailSerializer
+    permission_classes = (CanViewConceptDictionary,)
+
+    def get_object(self, queryset=None):
+        instance = get_object_or_404(self.get_queryset())
+        self.check_object_permissions(self.request, instance)
+        return instance
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        params = self.request.query_params.dict()
+        limit = 100
+        offset = 0
+        if 'limit' in params:
+            limit = int(params.get('limit'))
+        if 'offset' in params:
+            offset = int(params.get('offset'))
+        return Response(instance.hierarchy(offset=offset, limit=limit))
+
+
 class SourceSummaryView(SourceBaseView, RetrieveAPIView):
     serializer_class = SourceSummaryDetailSerializer
     permission_classes = (CanViewConceptDictionary,)
@@ -407,7 +428,7 @@ class SourceLatestVersionSummaryView(SourceVersionBaseView, RetrieveAPIView, Upd
         return queryset.order_by('-created_at')
 
 
-class SourceClientConfigsView(ResourceClientConfigsView):
+class SourceClientConfigsView(SourceBaseView, ResourceClientConfigsView):
     lookup_field = 'source'
     model = Source
     queryset = Source.objects.filter(is_active=True, version='HEAD')

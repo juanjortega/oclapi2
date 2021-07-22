@@ -14,7 +14,7 @@ from dateutil import parser
 from django.conf import settings
 from django.urls import NoReverseMatch, reverse, get_resolver, resolve, Resolver404
 from djqscsv import csv_file_for
-from pydash import flatten
+from pydash import flatten, compact
 from requests.auth import HTTPBasicAuth
 from rest_framework.utils import encoders
 
@@ -197,8 +197,7 @@ def write_export_file(
     logger.info('Writing export file to tmp directory: %s' % cwd)
 
     logger.info('Found %s version %s.  Looking up resource...' % (resource_type, version.version))
-    resource = version.head
-    logger.info('Found %s %s.  Serializing attributes...' % (resource_type, resource.mnemonic))
+    logger.info('Found %s %s.  Serializing attributes...' % (resource_type, version.mnemonic))
 
     resource_serializer = get_class(resource_serializer_type)(version)
     data = resource_serializer.data
@@ -212,6 +211,10 @@ def write_export_file(
     if not is_collection:
         concepts_qs = concepts_qs.filter(is_active=True)
         mappings_qs = mappings_qs.filter(is_active=True)
+
+    if version.is_head:
+        concepts_qs = concepts_qs.filter(is_latest_version=True)
+        mappings_qs = mappings_qs.filter(is_latest_version=True)
 
     total_concepts = concepts_qs.count()
     total_mappings = mappings_qs.count()
@@ -603,7 +606,7 @@ def is_csv_file(file=None, name=None):
 
 
 def is_url_encoded_string(string, lower=True):
-    encoded_string = encode_string(decode_string(string))
+    encoded_string = encode_string(decode_string(string), safe=' ')
 
     if lower:
         return string.lower() == encoded_string.lower()
@@ -611,9 +614,32 @@ def is_url_encoded_string(string, lower=True):
     return string == encoded_string
 
 
-def decode_string(string):
-    return parse.unquote(string)
+def decode_string(string, plus=True):
+    return parse.unquote_plus(string) if plus else parse.unquote(string)
 
 
 def encode_string(string, **kwargs):
-    return parse.quote_plus(string, **kwargs)
+    return parse.quote(string, **kwargs)
+
+
+def to_parent_uri_from_kwargs(params):
+    if not params:
+        return None
+
+    owner_type, owner, parent_type, parent = None, None, None, None
+
+    if 'org' in params:
+        owner_type = 'orgs'
+        owner = params.get('org')
+    elif 'user' in params:
+        owner_type = 'users'
+        owner = params.get('user')
+
+    if 'source' in params:
+        parent_type = 'sources'
+        parent = params.get('source')
+    elif 'collection' in params:
+        parent_type = 'collections'
+        parent = params.get('collection')
+
+    return '/' + '/'.join(compact([owner_type, owner, parent_type, parent, params.get('version', None)])) + '/'
