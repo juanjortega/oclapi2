@@ -17,6 +17,7 @@ The new and improved OCL terminology service v2
 
 ### Build image
 
+
 #### Crear archivo .env
 
 ```conf
@@ -42,5 +43,7 @@ docker rmi openconceptlab/oclapi2:development
 docker rmi openconceptlab/oclapi2:production
 ```
 
+# errores
 
+* redis error: 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1
 
