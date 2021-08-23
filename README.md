@@ -44,6 +44,13 @@ docker rmi openconceptlab/oclapi2:production
 
 * redis error: 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1
 
+### DB migrations
+After modifying model you need to create migration files. Run:
+
+`docker-compose run --rm api python manage.py makemigrations`
+
+Make sure to commit newly created migration files.
+
 ### Release
 
 Every build is a candidate for release.

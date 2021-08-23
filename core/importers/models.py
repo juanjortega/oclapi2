@@ -267,7 +267,7 @@ class SourceVersionImporter(BaseResourceImporter):
     def process(self):
         source = Source(**self.data)
         errors = Source.persist_new_version(source, self.user)
-        return errors or UPDATED
+        return errors or CREATED
 
 
 class CollectionImporter(BaseResourceImporter):
@@ -344,7 +344,7 @@ class CollectionVersionImporter(BaseResourceImporter):
     def process(self):
         coll = Collection(**self.data)
         errors = Collection.persist_new_version(coll, self.user)
-        return errors or UPDATED
+        return errors or CREATED
 
 
 class ConceptImporter(BaseResourceImporter):
@@ -435,6 +435,8 @@ class MappingImporter(BaseResourceImporter):
             'map_type': self.get('map_type'),
             'from_concept__uri__icontains': drop_version(from_concept_url),
         }
+        if self.get('id'):
+            filters['mnemonic'] = self.get('id')
         if to_concept_url:
             filters['to_concept__uri__icontains'] = drop_version(to_concept_url)
         if to_concept_code and to_source_url:
@@ -522,7 +524,7 @@ class ReferenceImporter(BaseResourceImporter):
 
 
 class BulkImportInline(BaseImporter):
-    def __init__(   # pylint: disable=too-many-arguments
+    def __init__(  # pylint: disable=too-many-arguments
             self, content, username, update_if_exists=False, input_list=None, user=None, set_user=True,
             self_task_id=None
     ):
@@ -824,10 +826,12 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
     @property
     def detailed_summary(self):
         result = self.json_result
-        return "Started: {} | Processed: {}/{} | Created: {} | Updated: {} | Existing: {} | Time: {}secs".format(
-            self.start_time_formatted, result.get('processed'), result.get('total'),
-            len(result.get('created')), len(result.get('updated')), len(result.get('exists')), self.elapsed_seconds
-        )
+        return "Started: {} | Processed: {}/{} | Created: {} | Updated: {} | Deleted: {} | " \
+            "Existing: {} | Time: {}secs".format(
+                self.start_time_formatted, result.get('processed'), result.get('total'),
+                len(result.get('created')), len(result.get('updated')), len(result.get('deleted')),
+                len(result.get('exists')), self.elapsed_seconds
+            )
 
     @property
     def start_time_formatted(self):
@@ -840,7 +844,7 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
 
         total_result = dict(
             total=0, processed=0, created=[], updated=[],
-            invalid=[], exists=[], failed=[], exception=[],
+            invalid=[], exists=[], failed=[], exception=[], deleted=[],
             others=[], unknown=[], elapsed_seconds=self.elapsed_seconds
         )
         for task in self.tasks:

@@ -20,7 +20,9 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
     class Meta:
         db_table = 'mappings'
         unique_together = ('mnemonic', 'version', 'parent')
-        indexes = [] + VersionedModel.Meta.indexes
+        indexes = [
+            models.Index(fields=['is_active', 'retired', 'is_latest_version', 'public_access']),
+        ] + VersionedModel.Meta.indexes
 
     parent = models.ForeignKey('sources.Source', related_name='mappings_set', on_delete=models.CASCADE)
     map_type = models.TextField(db_index=True)
@@ -96,6 +98,11 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         'to_concept_owner_type': {'sortable': False, 'filterable': True, 'facet': True},
         'external_id': {'sortable': False, 'filterable': True, 'facet': False, 'exact': False},
     }
+
+    @staticmethod
+    def get_search_document():
+        from core.mappings.documents import MappingDocument
+        return MappingDocument
 
     @property
     def mapping(self):  # for url kwargs
@@ -456,7 +463,6 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         is_latest = params.get('is_latest', None) in [True, 'true']
         include_retired = params.get(INCLUDE_RETIRED_PARAM, None) in [True, 'true']
         updated_since = parse_updated_since_param(params)
-        uri = params.get('uri', None)
         latest_released_version = None
         is_latest_released = container_version == LATEST
         if is_latest_released:
@@ -491,15 +497,13 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         if mapping:
             queryset = queryset.filter(mnemonic__exact=mapping)
         if mapping_version:
-            queryset = queryset.filter(cls.get_iexact_or_criteria('version', mapping_version))
+            queryset = queryset.filter(version=mapping_version)
         if is_latest:
             queryset = queryset.filter(is_latest_version=True)
         if not include_retired and not mapping:
             queryset = queryset.filter(retired=False)
         if updated_since:
             queryset = queryset.filter(updated_at__gte=updated_since)
-        if uri:
-            queryset = queryset.filter(uri__icontains=uri)
 
         return queryset
 

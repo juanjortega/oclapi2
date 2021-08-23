@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
-from django.db import models, IntegrityError, transaction
+from django.db import models, IntegrityError, transaction, connection
 from django.db.models import F
 from pydash import get, compact
 
@@ -14,7 +14,8 @@ from core.common.utils import parse_updated_since_param, generate_temp_version, 
     encode_string, decode_string
 from core.concepts.constants import CONCEPT_TYPE, LOCALES_FULLY_SPECIFIED, LOCALES_SHORT, LOCALES_SEARCH_INDEX_TERM, \
     CONCEPT_WAS_RETIRED, CONCEPT_IS_ALREADY_RETIRED, CONCEPT_IS_ALREADY_NOT_RETIRED, CONCEPT_WAS_UNRETIRED, \
-    PERSIST_CLONE_ERROR, PERSIST_CLONE_SPECIFY_USER_ERROR, ALREADY_EXISTS, CONCEPT_REGEX
+    PERSIST_CLONE_ERROR, PERSIST_CLONE_SPECIFY_USER_ERROR, ALREADY_EXISTS, CONCEPT_REGEX, MAX_LOCALES_LIMIT, \
+    MAX_NAMES_LIMIT, MAX_DESCRIPTIONS_LIMIT
 from core.concepts.mixins import ConceptValidationMixin
 
 
@@ -27,6 +28,7 @@ class LocalizedText(models.Model):
             models.Index(fields=['type']),
             models.Index(fields=['locale']),
             models.Index(fields=['locale_preferred']),
+            models.Index(fields=['created_at']),
         ]
 
     id = models.BigAutoField(primary_key=True)
@@ -37,6 +39,28 @@ class LocalizedText(models.Model):
     locale = models.TextField()
     locale_preferred = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    @classmethod
+    def get_dormant_queryset(cls):
+        return cls.objects.filter(name_locales__isnull=True, description_locales__isnull=True)
+
+    @classmethod
+    def dormants(cls, raw=True):
+        if raw:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT COUNT("localized_texts"."id") FROM "localized_texts"
+                    WHERE NOT EXISTS (SELECT 1 FROM "concepts_names" WHERE
+                    "concepts_names"."localizedtext_id" = "localized_texts"."id")
+                    AND NOT EXISTS (SELECT 1 FROM "concepts_descriptions"
+                    WHERE "concepts_descriptions"."localizedtext_id" = "localized_texts"."id")
+                    """
+                )
+                count, = cursor.fetchone()
+                return count
+
+        return cls.get_dormant_queryset().count()
 
     def save(self, force_insert=False, force_update=False, using=None, update_fields=None):
         if not self.internal_reference_id and self.id:
@@ -124,7 +148,9 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
     class Meta:
         db_table = 'concepts'
         unique_together = ('mnemonic', 'version', 'parent')
-        indexes = [] + VersionedModel.Meta.indexes
+        indexes = [
+            models.Index(fields=['is_active', 'retired', 'is_latest_version', 'public_access']),
+        ] + VersionedModel.Meta.indexes
 
     external_id = models.TextField(null=True, blank=True)
     concept_class = models.TextField()
@@ -171,6 +197,11 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         'owner_type': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
         'external_id': {'sortable': False, 'filterable': True, 'facet': False, 'exact': False},
     }
+
+    @staticmethod
+    def get_search_document():
+        from core.concepts.documents import ConceptDocument
+        return ConceptDocument
 
     @property
     def concept(self):  # for url kwargs
@@ -321,7 +352,6 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         concept = params.get('concept', None)
         concept_version = params.get('concept_version', None)
         is_latest = params.get('is_latest', None) in [True, 'true']
-        uri = params.get('uri', None)
         include_retired = params.get(INCLUDE_RETIRED_PARAM, None) in [True, 'true']
         updated_since = parse_updated_since_param(params)
         latest_released_version = None
@@ -361,15 +391,13 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
                          decode_string(concept), decode_string(concept, False)]
             queryset = queryset.filter(mnemonic__in=mnemonics)
         if concept_version:
-            queryset = queryset.filter(cls.get_iexact_or_criteria('version', concept_version))
+            queryset = queryset.filter(version=concept_version)
         if is_latest:
             queryset = queryset.filter(is_latest_version=True)
         if not include_retired and not concept:
             queryset = queryset.filter(retired=False)
         if updated_since:
             queryset = queryset.filter(updated_at__gte=updated_since)
-        if uri:
-            queryset = queryset.filter(uri__icontains=uri)
 
         return queryset
 
@@ -546,6 +574,7 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
             return concept
 
         try:
+            concept.validate_locales_limit(names, descriptions)
             concept.cloned_names = names
             concept.cloned_descriptions = descriptions
             concept.full_clean()
@@ -562,7 +591,8 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
             initial_version = None
             if create_initial_version:
                 initial_version = cls.create_initial_version(concept)
-                initial_version.set_locales()
+                initial_version.names.set(concept.names.all())
+                initial_version.descriptions.set(concept.descriptions.all())
                 initial_version.sources.set([parent_resource, parent_resource_head])
 
             concept.sources.set([parent_resource, parent_resource_head])
@@ -612,6 +642,8 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         prev_latest_version = versioned_object.versions.exclude(id=obj.id).filter(is_latest_version=True).first()
         try:
             with transaction.atomic():
+                cls.validate_locales_limit(obj.cloned_names, obj.cloned_descriptions)
+
                 cls.pause_indexing()
 
                 obj.is_latest_version = True
@@ -662,6 +694,13 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
                 errors['non_field_errors'] = [PERSIST_CLONE_ERROR]
 
         return errors
+
+    @staticmethod
+    def validate_locales_limit(names, descriptions):
+        if len(names) > MAX_LOCALES_LIMIT:
+            raise ValidationError({'names': [MAX_NAMES_LIMIT]})
+        if len(descriptions) > MAX_LOCALES_LIMIT:
+            raise ValidationError({'descriptions': [MAX_DESCRIPTIONS_LIMIT]})
 
     def get_unidirectional_mappings_for_collection(self, collection_url, collection_version=HEAD):
         from core.mappings.models import Mapping
@@ -784,3 +823,8 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
 
         result.reverse()
         return result
+
+    def delete(self, using=None, keep_parents=False):
+        LocalizedText.objects.filter(name_locales=self).delete()
+        LocalizedText.objects.filter(description_locales=self).delete()
+        return super().delete(using=using, keep_parents=keep_parents)

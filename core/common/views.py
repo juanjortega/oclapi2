@@ -14,13 +14,14 @@ from elasticsearch_dsl import Q
 from pydash import get
 from rest_framework import response, generics, status
 from rest_framework.generics import ListAPIView, RetrieveUpdateDestroyAPIView
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core import __version__
 from core.common.constants import SEARCH_PARAM, LIST_DEFAULT_LIMIT, CSV_DEFAULT_LIMIT, \
-    LIMIT_PARAM, NOT_FOUND, MUST_SPECIFY_EXTRA_PARAM_IN_BODY, INCLUDE_RETIRED_PARAM, VERBOSE_PARAM, HEAD, LATEST
+    LIMIT_PARAM, NOT_FOUND, MUST_SPECIFY_EXTRA_PARAM_IN_BODY, INCLUDE_RETIRED_PARAM, VERBOSE_PARAM, HEAD, LATEST, \
+    BRIEF_PARAM
 from core.common.mixins import PathWalkerMixin
 from core.common.serializers import RootSerializer
 from core.common.utils import compact_dict_by_values, to_snake_case, to_camel_case, parse_updated_since_param, \
@@ -60,10 +61,13 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         return not include_retired
 
     def _should_include_private(self):
-        return self.is_user_document() or self.request.user.is_staff
+        return self.is_user_document() or self.request.user.is_staff or self.is_user_scope()
 
     def is_verbose(self):
         return self.request.query_params.get(VERBOSE_PARAM, False) in ['true', True]
+
+    def is_brief(self):
+        return self.request.query_params.get(BRIEF_PARAM, False) in ['true', True]
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
@@ -382,6 +386,20 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         from core.sources.documents import SourceDocument
         return self.document_model in [SourceDocument, CollectionDocument]
 
+    def is_user_scope(self):
+        org = self.kwargs.get('org', None)
+        user = self.kwargs.get('user', None)
+
+        request_user = self.request.user
+
+        if request_user.is_authenticated:
+            if user:
+                return user == request_user.username
+            if org:
+                return request_user.organizations.filter(mnemonic=org).exists()
+
+        return False
+
     def get_public_criteria(self):
         criteria = Q('match', public_can_view=True)
         user = self.request.user
@@ -679,6 +697,8 @@ class RootView(BaseAPIView):  # pragma: no cover
             route = str(pattern.pattern)
             if route in ['v1-importers/']:
                 continue
+            if isinstance(route, str) and route.startswith('admin/'):
+                continue
             if route and name is None:
                 name = route.split('/')[0] + '_urls'
                 if name == 'user_urls':
@@ -756,3 +776,29 @@ class FeedbackView(APIView):  # pragma: no cover
         mail.send()
 
         return Response(status=status.HTTP_200_OK)
+
+
+class ConceptDuplicateLocalesView(APIView):  # pragma: no cover
+    permission_classes = (IsAdminUser,)
+
+    @staticmethod
+    def get(request):
+        from core.common.tasks import delete_duplicate_locales
+        delete_duplicate_locales.delay(int(request.query_params.get('start', 0)))
+        return Response(status=status.HTTP_200_OK)
+
+
+class ConceptDormantLocalesView(APIView):  # pragma: no cover
+    permission_classes = (IsAdminUser, )
+
+    @staticmethod
+    def get(_, **kwargs):  # pylint: disable=unused-argument
+        from core.concepts.models import LocalizedText
+        count = LocalizedText.dormants()
+        return Response(count, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def delete(_, **kwargs):  # pylint: disable=unused-argument
+        from core.common.tasks import delete_dormant_locales
+        delete_dormant_locales.delay()
+        return Response(status=status.HTTP_204_NO_CONTENT)

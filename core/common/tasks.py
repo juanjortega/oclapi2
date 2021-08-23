@@ -110,12 +110,14 @@ def add_references(
 
 
 def __handle_save(instance):
-    registry.update(instance)
-    registry.update_related(instance)
+    if instance:
+        registry.update(instance)
+        registry.update_related(instance)
 
 
 def __handle_pre_delete(instance):
-    registry.delete_related(instance)
+    if instance:
+        registry.delete_related(instance)
 
 
 @app.task(
@@ -123,7 +125,7 @@ def __handle_pre_delete(instance):
     acks_late=True, reject_on_worker_lost=True
 )
 def handle_save(app_name, model_name, instance_id):
-    __handle_save(apps.get_model(app_name, model_name).objects.get(id=instance_id))
+    __handle_save(apps.get_model(app_name, model_name).objects.filter(id=instance_id).first())
 
 
 @app.task(
@@ -131,16 +133,17 @@ def handle_save(app_name, model_name, instance_id):
     acks_late=True, reject_on_worker_lost=True
 )
 def handle_m2m_changed(app_name, model_name, instance_id, action):
-    instance = apps.get_model(app_name, model_name).objects.get(id=instance_id)
-    if action in ('post_add', 'post_remove', 'post_clear'):
-        __handle_save(instance)
-    elif action in ('pre_remove', 'pre_clear'):
-        __handle_pre_delete(instance)
+    instance = apps.get_model(app_name, model_name).objects.filter(id=instance_id).first()
+    if instance:
+        if action in ('post_add', 'post_remove', 'post_clear'):
+            __handle_save(instance)
+        elif action in ('pre_remove', 'pre_clear'):
+            __handle_pre_delete(instance)
 
 
 @app.task(ignore_result=True)
 def handle_pre_delete(app_name, model_name, instance_id):
-    __handle_pre_delete(apps.get_model(app_name, model_name).objects.get(id=instance_id))
+    __handle_pre_delete(apps.get_model(app_name, model_name).objects.filter(id=instance_id).first())
 
 
 @app.task(base=QueueOnce)
@@ -355,3 +358,84 @@ def process_hierarchy_for_new_parent_concept_version(prev_version_id, latest_ver
     if prev_version and latest_version:
         for concept in Concept.objects.filter(parent_concepts__uri=prev_version.uri):
             concept.parent_concepts.add(latest_version)
+
+
+@app.task
+def delete_duplicate_locales(start_from=None):  # pragma: no cover
+    from core.concepts.models import Concept
+    from django.db.models import Count
+    from django.db.models import Q
+    start_from = start_from or 0
+    queryset = Concept.objects.annotate(
+        names_count=Count('names'), desc_count=Count('descriptions')).filter(Q(names_count__gt=1) | Q(desc_count__gt=1))
+    total = queryset.count()
+    batch_size = 1000
+
+    logger.info('%d concepts with more than one locales. Getting them in batches of %d...' % (total, batch_size))  # pylint: disable=logging-not-lazy
+
+    for start in range(start_from, total, batch_size):
+        end = min(start + batch_size, total)
+        logger.info('Iterating concepts %d - %d...' % (start + 1, end))  # pylint: disable=logging-not-lazy
+        concepts = queryset.order_by('id')[start:end]
+        for concept in concepts:
+            logger.info('Cleaning up %s', concept.mnemonic)
+            for name in concept.names.all().reverse():
+                if concept.names.filter(
+                        type=name.type, name=name.name, locale=name.locale, locale_preferred=name.locale_preferred,
+                        external_id=name.external_id
+                ).count() > 1:
+                    name.delete()
+            for desc in concept.descriptions.all().reverse():
+                if concept.descriptions.filter(
+                        type=desc.type, name=desc.name, locale=desc.locale, locale_preferred=desc.locale_preferred,
+                        external_id=desc.external_id
+                ).count() > 1:
+                    desc.delete()
+
+
+@app.task
+def delete_dormant_locales():  # pragma: no cover
+    from core.concepts.models import LocalizedText
+    queryset = LocalizedText.get_dormant_queryset()
+    total = queryset.count()
+    logger.info('%s Dormant locales found. Deleting in batches...' % total)  # pylint: disable=logging-not-lazy
+
+    batch_size = 1000
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+        logger.info('Iterating locales %d - %d to delete...' % (start + 1, end))  # pylint: disable=logging-not-lazy
+        LocalizedText.objects.filter(id__in=queryset.order_by('id')[start:end].values('id')).delete()
+
+    return 1
+
+
+@app.task
+def delete_concept(concept_id):  # pragma: no cover
+    from core.concepts.models import Concept
+
+    concept = Concept.objects.filter(id=concept_id).first()
+    concept.delete()
+
+    return 1
+
+
+@app.task
+def batch_index_resources(resource, filters):
+    model = get_resource_class_from_resource_name(resource)
+    if model:
+        model.batch_index(model.objects.filter(**filters), model.get_search_document())
+
+    return 1
+
+
+@app.task
+def make_hierarchy(concept_map):  # pragma: no cover
+    from core.concepts.models import Concept
+
+    for parent_concept_uri, child_concept_urls in concept_map.items():
+        parent_concept = Concept.objects.filter(uri=parent_concept_uri).first()
+        if parent_concept:
+            latest_version = parent_concept.get_latest_version()
+            for child_concept in Concept.objects.filter(uri__in=child_concept_urls):
+                child_concept.parent_concepts.add(latest_version)
+                child_concept.get_latest_version().parent_concepts.add(latest_version)

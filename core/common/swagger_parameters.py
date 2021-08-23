@@ -2,7 +2,7 @@ from drf_yasg import openapi
 
 from core.common.constants import RELEASED_PARAM, VERBOSE_PARAM, INCLUDE_RETIRED_PARAM, PROCESSING_PARAM, \
     INCLUDE_INVERSE_MAPPINGS_PARAM, UPDATED_SINCE_PARAM, INCLUDE_SOURCE_VERSIONS, INCLUDE_COLLECTION_VERSIONS, \
-    LAST_LOGIN_BEFORE_PARAM, LAST_LOGIN_SINCE_PARAM
+    LAST_LOGIN_BEFORE_PARAM, LAST_LOGIN_SINCE_PARAM, DATE_JOINED_SINCE_PARAM, DATE_JOINED_BEFORE_PARAM
 
 # HEADERS
 include_facets_header = openapi.Parameter(
@@ -30,6 +30,12 @@ sort_asc_param = openapi.Parameter(
 )
 verbose_param = openapi.Parameter(
     VERBOSE_PARAM, openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN, default=False,
+)
+start_date_param = openapi.Parameter(
+    'start', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='YYYY-MM-DD', required=False
+)
+end_date_param = openapi.Parameter(
+    'end', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='YYYY-MM-DD', required=False
 )
 include_retired_param = openapi.Parameter(
     INCLUDE_RETIRED_PARAM, openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN, default=False,
@@ -60,6 +66,12 @@ last_login_before_param = openapi.Parameter(
 last_login_since_param = openapi.Parameter(
     LAST_LOGIN_SINCE_PARAM, openapi.IN_QUERY, description='YYYY-MM-DD (optional)', type=openapi.TYPE_STRING)
 
+date_joined_before_param = openapi.Parameter(
+    DATE_JOINED_BEFORE_PARAM, openapi.IN_QUERY, description='YYYY-MM-DD (optional)', type=openapi.TYPE_STRING)
+
+date_joined_since_param = openapi.Parameter(
+    DATE_JOINED_SINCE_PARAM, openapi.IN_QUERY, description='YYYY-MM-DD (optional)', type=openapi.TYPE_STRING)
+
 # bulk import params
 task_param = openapi.Parameter(
     'task', openapi.IN_QUERY, description="task uuid (mandatory)", type=openapi.TYPE_STRING
@@ -85,6 +97,9 @@ apps_param = openapi.Parameter(
 )
 ids_param = openapi.Parameter(
     'ids', openapi.IN_FORM, description="Resource Ids", type=openapi.TYPE_STRING
+)
+uri_param = openapi.Parameter(
+    'uri', openapi.IN_FORM, description="Relative URI", type=openapi.TYPE_STRING
 )
 resources_body_param = openapi.Parameter(
     'resource', openapi.IN_PATH, type=openapi.TYPE_STRING,
