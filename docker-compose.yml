@@ -5,6 +5,8 @@ services:
     image: postgres:12.3-alpine
     restart: "always"
     shm_size: "128mb"
+    volumes:
+        - master-db:/var/lib/postgresql/data
     environment:
       - POSTGRES_PASSWORD=${DB_PASSWORD-Postgres123}
     healthcheck:
@@ -166,4 +168,5 @@ services:
 
 volumes:
   postgres-data:
+  master-db:
   es-data:
