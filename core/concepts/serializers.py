@@ -185,6 +185,39 @@ class ConceptVersionListSerializer(ConceptListSerializer):
         super().__init__(*args, **kwargs)
 
 
+class ConceptSummarySerializer(ModelSerializer):
+    uuid = CharField(source='id', read_only=True)
+    id = EncodedDecodedCharField(source='mnemonic', read_only=True)
+    names = SerializerMethodField()
+    descriptions = SerializerMethodField()
+    versions = SerializerMethodField()
+
+    class Meta:
+        model = Concept
+        fields = ('names', 'descriptions', 'versions', 'id', 'uuid', 'versioned_object_id')
+
+    @staticmethod
+    def get_names(obj):
+        return obj.names.count()
+
+    @staticmethod
+    def get_descriptions(obj):
+        return obj.descriptions.count()
+
+    @staticmethod
+    def get_versions(obj):
+        return obj.versions.count()
+
+
+class ConceptMinimalSerializer(ModelSerializer):
+    uuid = CharField(source='id', read_only=True)
+    id = CharField(source='mnemonic', read_only=True)
+
+    class Meta:
+        model = Concept
+        fields = ('uuid', 'id')
+
+
 class ConceptDetailSerializer(ModelSerializer):
     uuid = CharField(source='id', read_only=True)
     version = CharField(read_only=True)
@@ -218,7 +251,8 @@ class ConceptDetailSerializer(ModelSerializer):
     hierarchy_path = SerializerMethodField()
 
     def __init__(self, *args, **kwargs):
-        params = get(kwargs, 'context.request.query_params')
+        request = get(kwargs, 'context.request')
+        params = get(request, 'query_params')
         self.view_kwargs = get(kwargs, 'context.view.kwargs', dict())
 
         self.query_params = params.dict() if params else dict()
@@ -241,7 +275,7 @@ class ConceptDetailSerializer(ModelSerializer):
                 self.fields.pop('child_concepts', None)
             if not self.include_child_concept_urls:
                 self.fields.pop('child_concept_urls')
-            if not self.include_parent_concept_urls:
+            if not self.include_parent_concept_urls and get(request, 'method') == 'GET':
                 self.fields.pop('parent_concept_urls')
         except:  # pylint: disable=bare-except
             pass
@@ -255,7 +289,8 @@ class ConceptDetailSerializer(ModelSerializer):
             'owner', 'owner_type', 'owner_url', 'display_name', 'display_locale', 'names', 'descriptions',
             'created_on', 'updated_on', 'versions_url', 'version', 'extras', 'parent_id', 'name', 'type',
             'update_comment', 'version_url', 'mappings', 'updated_by', 'created_by', 'internal_reference_id',
-            'parent_concept_urls', 'child_concept_urls', 'parent_concepts', 'child_concepts', 'hierarchy_path'
+            'parent_concept_urls', 'child_concept_urls', 'parent_concepts', 'child_concepts', 'hierarchy_path',
+            'public_can_view',
         )
 
     def get_mappings(self, obj):
@@ -308,6 +343,37 @@ class ConceptDetailSerializer(ModelSerializer):
         if self.include_hierarchy_path:
             return obj.get_hierarchy_path()
         return None
+
+
+class ConceptVersionExportSerializer(ModelSerializer):
+    type = CharField(source='resource_type')
+    uuid = CharField(source='id')
+    id = EncodedDecodedCharField(source='mnemonic')
+    names = LocalizedNameSerializer(many=True)
+    descriptions = LocalizedDescriptionSerializer(many=True, required=False, allow_null=True)
+    source = CharField(source='parent_resource')
+    source_url = URLField(source='parent_url')
+    owner = CharField(source='owner_name')
+    created_on = DateTimeField(source='created_at', read_only=True)
+    updated_on = DateTimeField(source='updated_at', read_only=True)
+    version_created_on = DateTimeField(source='created_at')
+    version_created_by = CharField(source='created_by')
+    locale = CharField(source='iso_639_1_locale')
+    url = CharField(source='versioned_object_url', read_only=True)
+    previous_version_url = CharField(source='prev_version_uri', read_only=True)
+    update_comment = CharField(source='comment', required=False, allow_null=True, allow_blank=True)
+    parent_concept_urls = ListField(read_only=True)
+    child_concept_urls = ListField(read_only=True)
+
+    class Meta:
+        model = Concept
+        fields = (
+            'type', 'uuid', 'id', 'external_id', 'concept_class', 'datatype', 'display_name', 'display_locale',
+            'names', 'descriptions', 'extras', 'retired', 'source', 'source_url', 'owner', 'owner_name', 'owner_url',
+            'version', 'created_on', 'updated_on', 'version_created_on', 'version_created_by', 'update_comment',
+            'is_latest_version', 'locale', 'url', 'owner_type', 'version_url', 'previous_version_url',
+            'internal_reference_id', 'parent_concept_urls', 'child_concept_urls',
+        )
 
 
 class ConceptVersionDetailSerializer(ModelSerializer):
