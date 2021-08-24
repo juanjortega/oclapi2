@@ -66,7 +66,7 @@ services:
       - AWS_REGION_NAME=${AWS_REGION_NAME-AAAA}
   celery_indexing:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
-    command: ["bash", "-c", "CELERY_WORKER_NAME=indexing ./start_celery_worker.sh -P prefork -Q indexing --autoscale=4,2"]
+    command: ["bash", "-c", "CELERY_WORKER_NAME=indexing ./start_celery_worker.sh -P prefork -Q indexing --autoscale=10,2"]
     restart: "always"
     depends_on:
       - redis
