@@ -115,8 +115,8 @@ class ConceptListSerializer(ModelSerializer):
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
-        self.view_kwargs = get(kwargs, 'context.view.kwargs', dict())
-        self.query_params = params.dict() if params else dict()
+        self.view_kwargs = get(kwargs, 'context.view.kwargs', {})
+        self.query_params = params.dict() if params else {}
         self.include_indirect_mappings = self.query_params.get(INCLUDE_INVERSE_MAPPINGS_PARAM) in ['true', True]
         self.include_direct_mappings = self.query_params.get(INCLUDE_MAPPINGS_PARAM) in ['true', True]
         self.include_extras = self.query_params.get(INCLUDE_EXTRAS_PARAM) in ['true', True]
@@ -170,7 +170,7 @@ class ConceptVersionListSerializer(ConceptListSerializer):
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
-        self.query_params = params.dict() if params else dict()
+        self.query_params = params.dict() if params else {}
         self.include_source_versions = self.query_params.get(INCLUDE_SOURCE_VERSIONS) in ['true', True]
         self.include_collection_versions = self.query_params.get(INCLUDE_COLLECTION_VERSIONS) in ['true', True]
 
@@ -253,9 +253,9 @@ class ConceptDetailSerializer(ModelSerializer):
     def __init__(self, *args, **kwargs):
         request = get(kwargs, 'context.request')
         params = get(request, 'query_params')
-        self.view_kwargs = get(kwargs, 'context.view.kwargs', dict())
+        self.view_kwargs = get(kwargs, 'context.view.kwargs', {})
 
-        self.query_params = params.dict() if params else dict()
+        self.query_params = params.dict() if params else {}
         self.include_indirect_mappings = self.query_params.get(INCLUDE_INVERSE_MAPPINGS_PARAM) in ['true', True]
         self.include_direct_mappings = self.query_params.get(INCLUDE_MAPPINGS_PARAM) in ['true', True]
         self.include_parent_concept_urls = self.query_params.get(INCLUDE_PARENT_CONCEPT_URLS) in ['true', True]
@@ -277,6 +277,8 @@ class ConceptDetailSerializer(ModelSerializer):
                 self.fields.pop('child_concept_urls')
             if not self.include_parent_concept_urls and get(request, 'method') == 'GET':
                 self.fields.pop('parent_concept_urls')
+            if not self.include_hierarchy_path:
+                self.fields.pop('hierarchy_path', None)
         except:  # pylint: disable=bare-except
             pass
 
@@ -288,7 +290,7 @@ class ConceptDetailSerializer(ModelSerializer):
             'uuid', 'id', 'external_id', 'concept_class', 'datatype', 'url', 'retired', 'source',
             'owner', 'owner_type', 'owner_url', 'display_name', 'display_locale', 'names', 'descriptions',
             'created_on', 'updated_on', 'versions_url', 'version', 'extras', 'parent_id', 'name', 'type',
-            'update_comment', 'version_url', 'mappings', 'updated_by', 'created_by', 'internal_reference_id',
+            'update_comment', 'version_url', 'mappings', 'updated_by', 'created_by',
             'parent_concept_urls', 'child_concept_urls', 'parent_concepts', 'child_concepts', 'hierarchy_path',
             'public_can_view',
         )
@@ -372,7 +374,7 @@ class ConceptVersionExportSerializer(ModelSerializer):
             'names', 'descriptions', 'extras', 'retired', 'source', 'source_url', 'owner', 'owner_name', 'owner_url',
             'version', 'created_on', 'updated_on', 'version_created_on', 'version_created_by', 'update_comment',
             'is_latest_version', 'locale', 'url', 'owner_type', 'version_url', 'previous_version_url',
-            'internal_reference_id', 'parent_concept_urls', 'child_concept_urls',
+            'parent_concept_urls', 'child_concept_urls',
         )
 
 
@@ -403,11 +405,11 @@ class ConceptVersionDetailSerializer(ModelSerializer):
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
-        self.view_kwargs = get(kwargs, 'context.view.kwargs', dict())
+        self.view_kwargs = get(kwargs, 'context.view.kwargs', {})
 
         self.include_indirect_mappings = False
         self.include_direct_mappings = False
-        self.query_params = params.dict() if params else dict()
+        self.query_params = params.dict() if params else {}
         self.include_indirect_mappings = self.query_params.get(INCLUDE_INVERSE_MAPPINGS_PARAM) == 'true'
         self.include_direct_mappings = self.query_params.get(INCLUDE_MAPPINGS_PARAM) == 'true'
         self.include_parent_concepts = self.query_params.get(INCLUDE_PARENT_CONCEPTS) in ['true', True]
@@ -436,7 +438,7 @@ class ConceptVersionDetailSerializer(ModelSerializer):
             'names', 'descriptions', 'extras', 'retired', 'source', 'source_url', 'owner', 'owner_name', 'owner_url',
             'version', 'created_on', 'updated_on', 'version_created_on', 'version_created_by', 'update_comment',
             'is_latest_version', 'locale', 'url', 'owner_type', 'version_url', 'mappings', 'previous_version_url',
-            'internal_reference_id', 'parent_concepts', 'child_concepts', 'parent_concept_urls', 'child_concept_urls',
+            'parent_concepts', 'child_concepts', 'parent_concept_urls', 'child_concept_urls',
             'source_versions', 'collection_versions'
         )
 
@@ -479,3 +481,65 @@ class ConceptHierarchySerializer(ModelSerializer):
     class Meta:
         model = Concept
         fields = ('uuid', 'id', 'url', 'children', 'name')
+
+
+class ConceptChildrenSerializer(ModelSerializer):
+    uuid = CharField(source='id')
+    id = EncodedDecodedCharField(source='mnemonic')
+    url = CharField(source='uri')
+    name = CharField(source='display_name')
+    children = SerializerMethodField()
+
+    class Meta:
+        model = Concept
+        fields = ('uuid', 'id', 'url', 'children', 'name')
+
+    def __init__(self, *args, **kwargs):
+        params = get(kwargs, 'context.request.query_params')
+
+        self.query_params = params.dict() if params else {}
+        self.include_child_concepts = self.query_params.get(INCLUDE_CHILD_CONCEPTS) in ['true', True]
+
+        try:
+            if not self.include_child_concepts:
+                self.fields.pop('children', None)
+        except:  # pylint: disable=bare-except
+            pass
+
+        super().__init__(*args, **kwargs)
+
+    def get_children(self, obj):
+        if self.include_child_concepts:
+            return obj.child_concept_urls
+        return None
+
+
+class ConceptParentsSerializer(ModelSerializer):
+    uuid = CharField(source='id')
+    id = EncodedDecodedCharField(source='mnemonic')
+    url = CharField(source='uri')
+    name = CharField(source='display_name')
+    parents = SerializerMethodField()
+
+    class Meta:
+        model = Concept
+        fields = ('uuid', 'id', 'url', 'parents', 'name')
+
+    def __init__(self, *args, **kwargs):
+        params = get(kwargs, 'context.request.query_params')
+
+        self.query_params = params.dict() if params else {}
+        self.include_parent_concepts = self.query_params.get(INCLUDE_PARENT_CONCEPTS) in ['true', True]
+
+        try:
+            if not self.include_parent_concepts:
+                self.fields.pop('parents', None)
+        except:  # pylint: disable=bare-except
+            pass
+
+        super().__init__(*args, **kwargs)
+
+    def get_parents(self, obj):
+        if self.include_parent_concepts:
+            return obj.parent_concept_urls
+        return None

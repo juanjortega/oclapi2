@@ -45,7 +45,7 @@ class MappingListSerializer(ModelSerializer):
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
-        self.query_params = params.dict() if params else dict()
+        self.query_params = params.dict() if params else {}
         self.include_from_source = self.query_params.get(MAPPING_LOOKUP_FROM_SOURCE) in ['true', True]
         self.include_to_source = self.query_params.get(MAPPING_LOOKUP_TO_SOURCE) in ['true', True]
         self.include_sources = self.query_params.get(MAPPING_LOOKUP_SOURCES) in ['true', True]
@@ -88,7 +88,7 @@ class MappingVersionListSerializer(MappingListSerializer):
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
-        self.query_params = params.dict() if params else dict()
+        self.query_params = params.dict() if params else {}
         self.include_source_versions = self.query_params.get(INCLUDE_SOURCE_VERSIONS) in ['true', True]
         self.include_collection_versions = self.query_params.get(INCLUDE_COLLECTION_VERSIONS) in ['true', True]
 
@@ -123,10 +123,8 @@ class MappingDetailSerializer(MappingListSerializer):
     class Meta:
         model = Mapping
         fields = MappingListSerializer.Meta.fields + (
-            'type', 'uuid', 'extras', 'created_on', 'updated_on',
-            'created_by', 'updated_by', 'parent_id', 'internal_reference_id',
-            'public_can_view',
-        )
+            'type', 'uuid', 'extras', 'created_on', 'updated_on', 'created_by',
+            'updated_by', 'parent_id', 'public_can_view',)
 
     def create(self, validated_data):
         mapping = Mapping.persist_new(data=validated_data, user=self.context.get('request').user)

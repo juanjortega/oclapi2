@@ -1,3 +1,4 @@
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.generics import ListAPIView, \
@@ -5,7 +6,7 @@ from rest_framework.generics import ListAPIView, \
 from rest_framework.permissions import IsAuthenticatedOrReadOnly
 from rest_framework.response import Response
 
-from core.common.constants import MAX_PINS_ALLOWED
+from core.common.constants import MAX_PINS_ALLOWED, INCLUDE_CREATOR_PINS
 from core.common.views import BaseAPIView
 from core.orgs.models import Organization
 from core.pins.models import Pin
@@ -19,6 +20,9 @@ class PinBaseView(BaseAPIView):
 
     def filter_queryset(self, queryset):
         return queryset
+
+    def should_include_creator_pins(self):
+        return self.request.query_params.get(INCLUDE_CREATOR_PINS, None) in ['true', True]
 
     def get_parent_type(self):
         if self.kwargs.get('user_is_self') or 'user' in self.kwargs:
@@ -46,8 +50,12 @@ class PinBaseView(BaseAPIView):
         return None
 
     def get_queryset(self):
+        filters = self.get_parent_filter()
+        criteria = Q(**filters)
+        if self.should_include_creator_pins() and 'org' not in self.kwargs:
+            criteria |= Q(created_by_id=self.request.user.id, user_id__isnull=True)
         return Pin.objects.filter(
-            **self.get_parent_filter()
+            criteria
         ).select_related('organization', 'user').prefetch_related('resource')
 
 
@@ -58,11 +66,15 @@ class PinListView(PinBaseView, ListAPIView):
             return Response(status=status.HTTP_404_NOT_FOUND)
         if parent.pins.count() >= MAX_PINS_ALLOWED:
             return Response(
-                dict(error=["Can only keep max {} items pinned".format(MAX_PINS_ALLOWED)]),
+                dict(error=[f"Can only keep max {MAX_PINS_ALLOWED} items pinned"]),
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        serializer = self.get_serializer(data={**request.data, self.get_parent_type() + '_id': parent.id})
+        serializer = self.get_serializer(
+            data={
+                **request.data, self.get_parent_type() + '_id': parent.id, 'created_by_id': self.request.user.id
+            }
+        )
         if serializer.is_valid():
             serializer.save()
             if not serializer.errors:

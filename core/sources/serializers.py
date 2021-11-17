@@ -229,13 +229,13 @@ class SourceDetailSerializer(SourceCreateOrUpdateSerializer):
             'canonical_url', 'identifier', 'publisher', 'contact', 'jurisdiction', 'purpose', 'copyright',
             'content_type', 'revision_date', 'logo_url', 'summary', 'text', 'client_configs',
             'experimental', 'case_sensitive', 'collection_reference', 'hierarchy_meaning', 'compositional',
-            'version_needed', 'internal_reference_id', 'hierarchy_root_url', 'hierarchy_root', 'meta'
+            'version_needed', 'hierarchy_root_url', 'hierarchy_root', 'meta'
         )
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
 
-        self.query_params = dict()
+        self.query_params = {}
         if params:
             self.query_params = params if isinstance(params, dict) else params.dict()
         self.include_summary = self.query_params.get(INCLUDE_SUMMARY) in ['true', True]
@@ -307,7 +307,7 @@ class SourceVersionDetailSerializer(SourceCreateOrUpdateSerializer):
             'canonical_url', 'identifier', 'publisher', 'contact', 'jurisdiction', 'purpose', 'copyright',
             'content_type', 'revision_date', 'summary', 'text', 'meta',
             'experimental', 'case_sensitive', 'collection_reference', 'hierarchy_meaning', 'compositional',
-            'version_needed', 'internal_reference_id'
+            'version_needed'
         )
 
     def __init__(self, *args, **kwargs):

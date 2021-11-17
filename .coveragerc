@@ -7,16 +7,15 @@ omit =
     core/common/healthcheck/*
     core/reports/*
     core/wsgi.py
-    */v1_dump/*
     */management/commands/*
     */migrations/*
     */documents.py
     core/common/search.py
+    core/common/errbit.py
     */es_normalizers.py
     */feeds.py
     *test*
     core/middlewares/*
-    core/v1_importers/*
     *.css
     *.html
 concurrency=multiprocessing

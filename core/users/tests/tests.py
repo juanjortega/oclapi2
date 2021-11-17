@@ -107,17 +107,6 @@ class UserProfileTest(OCLTestCase):
         self.assertTrue(source.is_active)
         self.assertTrue(collection.is_active)
 
-    def test_internal_reference_id(self):
-        user = UserProfileFactory.build(id=123)
-
-        self.assertIsNotNone(user.id)
-        self.assertIsNone(user.internal_reference_id)
-
-        user.save()
-
-        self.assertIsNotNone(user.id)
-        self.assertEqual(user.internal_reference_id, str(user.id))
-
     def test_update_password(self):
         user = UserProfileFactory()
         user.set_password('Password123!')
@@ -289,7 +278,7 @@ class TasksTest(OCLTestCase):
         self.assertEqual(mail.subject, 'Confirm E-mail Address')
         self.assertEqual(mail.to, [user.email])
         self.assertTrue(user.email_verification_url in mail.body)
-        self.assertTrue('Hi {},'.format(user.username) in mail.body)
+        self.assertTrue(f'Hi {user.username},' in mail.body)
         send_mail_mock.assert_called_once()
 
     @patch('core.common.tasks.EmailMessage.send')
@@ -305,5 +294,5 @@ class TasksTest(OCLTestCase):
         self.assertEqual(mail.subject, 'Password Reset E-mail')
         self.assertEqual(mail.to, [user.email])
         self.assertTrue(user.reset_password_url in mail.body)
-        self.assertTrue('Hi {},'.format(user.username) in mail.body)
+        self.assertTrue(f'Hi {user.username},' in mail.body)
         send_mail_mock.assert_called_once()
