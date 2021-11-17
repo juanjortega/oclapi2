@@ -3,6 +3,7 @@ import uuid
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models, IntegrityError, transaction
+from django.db.models import Q
 from pydash import get, compact
 
 from core.common.constants import INCLUDE_RETIRED_PARAM, NAMESPACE_REGEX, HEAD, LATEST
@@ -21,8 +22,13 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         db_table = 'mappings'
         unique_together = ('mnemonic', 'version', 'parent')
         indexes = [
-            models.Index(fields=['is_active', 'retired', 'is_latest_version', 'public_access']),
-        ] + VersionedModel.Meta.indexes
+                      models.Index(name='mappings_updated_4589ad_idx', fields=['-updated_at'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(is_latest_version=True) &
+                                              ~Q(public_access='None'))),
+                      models.Index(name='mappings_public_conditional', fields=['public_access'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(is_latest_version=True) &
+                                              ~Q(public_access='None'))),
+                  ] + VersionedModel.Meta.indexes
 
     parent = models.ForeignKey('sources.Source', related_name='mappings_set', on_delete=models.CASCADE)
     map_type = models.TextField(db_index=True)
@@ -59,6 +65,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
     to_concept_name = models.TextField(null=True, blank=True)
     to_source_url = models.TextField(null=True, blank=True, db_index=True)
     to_source_version = models.TextField(null=True, blank=True)
+    _counted = models.BooleanField(default=True, null=True, blank=True)
 
     logo_path = None
     name = None
@@ -134,7 +141,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
 
     @property
     def from_source_shorthand(self):
-        return "%s:%s" % (self.from_source_owner_mnemonic, self.from_source_name)
+        return f"{self.from_source_owner_mnemonic}:{self.from_source_name}"
 
     @property
     def from_concept_url(self):
@@ -142,7 +149,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
 
     @property
     def from_concept_shorthand(self):
-        return "%s:%s" % (self.from_source_shorthand, self.from_concept_code)
+        return f"{self.from_source_shorthand}:{self.from_concept_code}"
 
     def get_to_source(self):
         if self.to_source_id:
@@ -178,7 +185,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
 
     @property
     def to_source_shorthand(self):
-        return self.get_to_source() and "%s:%s" % (self.to_source_owner_mnemonic, self.to_source_name)
+        return self.get_to_source() and f"{self.to_source_owner_mnemonic}:{self.to_source_name}"
 
     def get_to_concept_name(self):
         return self.to_concept_name or get(self, 'to_concept.display_name')
@@ -192,7 +199,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
 
     @property
     def to_concept_shorthand(self):
-        return "%s:%s" % (self.to_source_shorthand, self.get_to_concept_code())
+        return f"{self.to_source_shorthand}:{self.get_to_concept_code()}"
 
     @staticmethod
     def get_resource_url_kwarg():
@@ -344,7 +351,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         temp_version = generate_temp_version()
         mapping.mnemonic = data.get('mnemonic', temp_version)
         mapping.version = temp_version
-        mapping.errors = dict()
+        mapping.errors = {}
         if mapping.is_existing_in_parent():
             mapping.errors = dict(__all__=[ALREADY_EXISTS])
             return mapping
@@ -365,6 +372,8 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
             initial_version = cls.create_initial_version(mapping)
             initial_version.sources.set([parent, parent_head])
             mapping.sources.set([parent, parent_head])
+            if mapping._counted is True:
+                parent.update_mappings_count()
         except ValidationError as ex:
             mapping.errors.update(ex.message_dict)
         except IntegrityError as ex:
@@ -397,7 +406,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
 
     @classmethod
     def persist_clone(cls, obj, user=None, **kwargs):
-        errors = dict()
+        errors = {}
         if not user:
             errors['version_created_by'] = PERSIST_CLONE_SPECIFY_USER_ERROR
             return errors
@@ -407,7 +416,8 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         parent = obj.parent
         parent_head = parent.head
         persisted = False
-        prev_latest_version = None
+        prev_latest_version = cls.objects.filter(
+            versioned_object_id=obj.versioned_object_id, is_latest_version=True).first()
         try:
             with transaction.atomic():
                 cls.pause_indexing()
@@ -418,12 +428,9 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
                     obj.version = str(obj.id)
                     obj.save()
                     obj.update_versioned_object()
-                    versioned_object = obj.versioned_object
-                    prev_latest_version = versioned_object.versions.exclude(id=obj.id).filter(
-                        is_latest_version=True).first()
                     if prev_latest_version:
                         prev_latest_version.is_latest_version = False
-                        prev_latest_version.save()
+                        prev_latest_version.save(update_fields=['is_latest_version'])
 
                     obj.sources.set(compact([parent, parent_head]))
                     persisted = True
@@ -444,7 +451,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
                     obj.sources.remove(parent_head)
                     if prev_latest_version:
                         prev_latest_version.is_latest_version = True
-                        prev_latest_version.save()
+                        prev_latest_version.save(update_fields=['is_latest_version'])
                     obj.delete()
                 errors['non_field_errors'] = [PERSIST_CLONE_ERROR]
 

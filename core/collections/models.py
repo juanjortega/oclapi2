@@ -1,10 +1,7 @@
-import json
-
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models import UniqueConstraint
 from django.utils import timezone
-from rest_framework.test import APIRequestFactory
 
 from core.collections.constants import (
     COLLECTION_TYPE, CONCEPTS_EXPRESSIONS,
@@ -13,15 +10,13 @@ from core.collections.constants import (
     CONCEPT_PREFERRED_NAME_UNIQUE_PER_COLLECTION_AND_LOCALE, ALL_SYMBOL, COLLECTION_VERSION_TYPE)
 from core.collections.utils import is_concept, is_mapping
 from core.common.constants import (
-    DEFAULT_REPOSITORY_TYPE, ACCESS_TYPE_VIEW, ACCESS_TYPE_EDIT
-)
+    DEFAULT_REPOSITORY_TYPE, ACCESS_TYPE_VIEW, ACCESS_TYPE_EDIT,
+    ACCESS_TYPE_NONE)
 from core.common.models import ConceptContainerModel
 from core.common.utils import is_valid_uri, drop_version
 from core.concepts.constants import LOCALES_FULLY_SPECIFIED
 from core.concepts.models import Concept
-from core.concepts.views import ConceptListView
 from core.mappings.models import Mapping
-from core.mappings.views import MappingListView
 
 
 class Collection(ConceptContainerModel):
@@ -79,7 +74,7 @@ class Collection(ConceptContainerModel):
         include_references = params.pop('include_references', None) in [True, 'true']
         queryset = super().get_base_queryset(params)
         if collection:
-            queryset = queryset.filter(cls.get_iexact_or_criteria('mnemonic', collection))
+            queryset = queryset.filter(cls.get_exact_or_criteria('mnemonic', collection))
         if contains_uri:
             queryset = queryset.filter(
                 references__expression=contains_uri, public_access__in=[ACCESS_TYPE_EDIT, ACCESS_TYPE_VIEW]
@@ -159,7 +154,7 @@ class Collection(ConceptContainerModel):
         if not other_concepts_in_collection.exists():
             return
 
-        matching_names_in_concept = dict()
+        matching_names_in_concept = {}
         names = concept.names.filter(**{attribute: value})
 
         for name in names:
@@ -174,49 +169,44 @@ class Collection(ConceptContainerModel):
                 raise ValidationError(validation_error)
 
     @staticmethod
-    def __get_children_uris(url, view_klass):
-        view = view_klass.as_view()
-        request = APIRequestFactory().get(url)
-        response = view(request)
-        response.render()
-        data = json.loads(response.content)
-        return [child['url'] for child in data]
-
-    def __get_expressions_from(self, expressions, url, view_klass):
-        if expressions == ALL_SYMBOL:
-            return self.__get_children_uris(url, view_klass)
-
-        return expressions
-
-    @staticmethod
-    def __get_children_list_url(child_type, host_url, data):
-        return "{host_url}{uri}{child_type}?q={search_term}&limit=0".format(
-            host_url=host_url, uri=data.get('uri'), child_type=child_type, search_term=data.get('search_term', '')
-        )
+    def get_source_from_uri(uri):
+        from core.sources.models import Source
+        return Source.objects.filter(uri=uri).first()
 
     @transaction.atomic
-    def add_expressions(self, data, host_url, user, cascade_mappings=False):
+    def add_expressions(self, data, user, cascade_mappings=False, cascade_to_concepts=False):
         expressions = data.get('expressions', [])
         concept_expressions = data.get('concepts', [])
         mapping_expressions = data.get('mappings', [])
+        source = None
+        source_uri = data.get('uri')
+        if source_uri:
+            source = self.get_source_from_uri(source_uri)
 
-        expressions.extend(
-            self.__get_expressions_from(
-                concept_expressions, self.__get_children_list_url('concepts', host_url, data), ConceptListView
-            )
-        )
-        expressions.extend(
-            self.__get_expressions_from(
-                mapping_expressions, self.__get_children_list_url('mappings', host_url, data), MappingListView
-            )
-        )
-        if cascade_mappings:
-            all_related_mappings = self.get_all_related_mappings(expressions)
-            expressions += all_related_mappings
+        if source:
+            can_view_all_content = source.can_view_all_content(user)
 
-        return self.add_references_in_bulk(expressions, user)
+            def get_child_expressions(queryset):
+                if source.is_head:
+                    queryset = queryset.filter(is_latest_version=True)
+                if not can_view_all_content:
+                    queryset = queryset.filter(public_access=ACCESS_TYPE_NONE)
+                return list(queryset.values_list('uri', flat=True))
 
-    def add_references_in_bulk(self, expressions, user=None):  # pylint: disable=too-many-locals,too-many-branches  # Fixme: Sny
+            if concept_expressions == ALL_SYMBOL:
+                expressions.extend(get_child_expressions(source.concepts))
+            if mapping_expressions == ALL_SYMBOL:
+                expressions.extend(get_child_expressions(source.mappings))
+        else:
+            expressions.extend(concept_expressions)
+            expressions.extend(mapping_expressions)
+
+        if cascade_mappings or cascade_to_concepts:
+            expressions += self.get_all_related_uris(expressions, cascade_to_concepts)
+
+        return self.add_references(expressions, user)
+
+    def add_references(self, expressions, user=None):  # pylint: disable=too-many-locals,too-many-branches  # Fixme: Sny
         errors = {}
         collection_version = self.head
 
@@ -229,7 +219,7 @@ class Collection(ConceptContainerModel):
                 new_expressions.discard(existing_expression)
                 errors[existing_expression] = [REFERENCE_ALREADY_EXISTS]
 
-        added_references = list()
+        added_references = []
         for expression in new_expressions:
             ref = CollectionReference(expression=expression)
             try:
@@ -275,29 +265,10 @@ class Collection(ConceptContainerModel):
             collection_version.updated_by = user
             self.updated_by = user
         collection_version.save()
-        self.save()
+        collection_version.update_children_counts()
+        if collection_version.id != self.id:
+            self.save()
         return added_references, errors
-
-    def add_references(self, expressions, user=None):
-        errors = {}
-
-        for expression in expressions:
-            reference = CollectionReference(expression=expression)
-            try:
-                self.validate(reference)
-                reference.save()
-            except Exception as ex:
-                errors[expression] = ex.messages if hasattr(ex, 'messages') else ex
-                continue
-
-            head = self.head
-            ref_hash = {'col_reference': reference}
-
-            error = Collection.persist_changes(head, user, None, **ref_hash)
-            if error:
-                errors[expression] = error
-
-        return errors
 
     @classmethod
     def persist_changes(cls, obj, updated_by, original_schema, **kwargs):
@@ -327,6 +298,7 @@ class Collection(ConceptContainerModel):
 
         from core.concepts.documents import ConceptDocument
         from core.mappings.documents import MappingDocument
+        head.update_children_counts()
         self.batch_index(Concept.objects.filter(uri__in=expressions), ConceptDocument)
         self.batch_index(Mapping.objects.filter(uri__in=expressions), MappingDocument)
 
@@ -336,7 +308,7 @@ class Collection(ConceptContainerModel):
         mappings = Mapping.objects.filter(uri__in=expressions)
         return concepts, mappings
 
-    def get_all_related_mappings(self, expressions):
+    def get_all_related_uris(self, expressions, cascade_to_concepts=False):
         all_related_mappings = []
         unversioned_mappings = []
         concept_expressions = []
@@ -351,7 +323,7 @@ class Collection(ConceptContainerModel):
             ref = CollectionReference(expression=concept_expression)
             try:
                 self.validate(ref)
-                all_related_mappings += ref.get_related_mappings(unversioned_mappings)
+                all_related_mappings += ref.get_related_uris(unversioned_mappings, cascade_to_concepts)
             except:  # pylint: disable=bare-except
                 continue
 
@@ -379,7 +351,6 @@ class CollectionReference(models.Model):
     original_expression = None
 
     id = models.BigAutoField(primary_key=True)
-    internal_reference_id = models.CharField(max_length=255, null=True, blank=True)
     expression = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -426,11 +397,6 @@ class CollectionReference(models.Model):
         if not is_resolved:
             self.last_resolved_at = None
 
-    def save(self, force_insert=False, force_update=False, using=None, update_fields=None):
-        if not self.internal_reference_id and self.id:
-            self.internal_reference_id = str(self.id)
-        super().save(force_insert, force_update, using, update_fields)
-
     def create_entities_from_expressions(self):
         __is_concept = is_concept(self.expression)
         __is_mapping = is_mapping(self.expression)
@@ -444,15 +410,15 @@ class CollectionReference(models.Model):
         elif self.mappings and self.mappings.exists():
             self.expression = self.mappings.first().uri
 
-    def get_related_mappings(self, exclude_mapping_uris):
-        mappings = []
+    def get_related_uris(self, exclude_mapping_uris, cascade_to_concepts=False):
+        uris = []
         concepts = self.get_concepts()
         if concepts.exists():
             for concept in concepts:
-                mappings = list(
-                    concept.get_unidirectional_mappings().exclude(
-                        uri__in=exclude_mapping_uris
-                    ).values_list('uri', flat=True)
-                )
+                mapping_queryset = concept.get_unidirectional_mappings().exclude(uri__in=exclude_mapping_uris)
+                uris = list(mapping_queryset.values_list('uri', flat=True))
+                if cascade_to_concepts:
+                    to_concepts_queryset = mapping_queryset.filter(to_concept__parent_id=concept.parent_id)
+                    uris += list(to_concepts_queryset.values_list('to_concept__uri', flat=True))
 
-        return mappings
+        return uris

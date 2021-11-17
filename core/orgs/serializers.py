@@ -43,7 +43,7 @@ class OrganizationCreateSerializer(serializers.ModelSerializer):
         user = self.context['request'].user
         mnemonic = validated_data.get('mnemonic', None)
         if Organization.objects.filter(mnemonic=mnemonic).exists():
-            self._errors['mnemonic'] = 'Organization with mnemonic %s already exists.' % mnemonic
+            self._errors['mnemonic'] = f'Organization with mnemonic {mnemonic} already exists.'
             return Organization()
         organization = Organization(name=validated_data.get('name'), mnemonic=mnemonic)
         organization.created_by = user
@@ -90,12 +90,12 @@ class OrganizationDetailSerializer(serializers.ModelSerializer):
             'type', 'uuid', 'id', 'public_access', 'name', 'company', 'website', 'location', 'members',
             'created_on', 'updated_on', 'url', 'extras', 'members_url', 'created_by', 'updated_by', 'location',
             'sources_url', 'public_sources', 'collections_url', 'public_collections', 'logo_url', 'description',
-            'client_configs', 'text', 'internal_reference_id',
+            'client_configs', 'text',
         )
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
-        self.query_params = params.dict() if params else dict()
+        self.query_params = params.dict() if params else {}
         self.include_client_configs = self.query_params.get(INCLUDE_CLIENT_CONFIGS) in ['true', True]
 
         if not self.include_client_configs:

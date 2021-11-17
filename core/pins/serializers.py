@@ -52,12 +52,13 @@ class PinSerializer(serializers.ModelSerializer):
     user_id = serializers.IntegerField(required=False, allow_null=True)
     organization_id = serializers.IntegerField(required=False, allow_null=True)
     resource = SerializerMethodField()
+    created_by_id = serializers.IntegerField(required=True)
 
     class Meta:
         model = Pin
         fields = (
             'id', 'created_at', 'resource_uri', 'user_id', 'organization_id', 'resource_type', 'resource_id',
-            'resource', 'uri', 'order'
+            'resource', 'uri', 'order', 'created_by_id'
         )
 
     def create(self, validated_data):
@@ -71,7 +72,7 @@ class PinSerializer(serializers.ModelSerializer):
         )
 
         if not resource:
-            self._errors['resource'] = 'Resource type %s with id %s does not exists.' % (resource_type, resource_id)
+            self._errors['resource'] = f'Resource type {resource_type} with id {resource_id} does not exists.'
             return item
 
         try:

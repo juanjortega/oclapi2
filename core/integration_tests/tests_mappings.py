@@ -47,14 +47,6 @@ class MappingListViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data), 1)
 
-    def test_post_405(self):
-        response = self.client.post(
-            '/mappings/',
-            dict(foo='bar'),
-            HTTP_AUTHORIZATION='Token ' + self.token,
-        )
-        self.assertEqual(response.status_code, 405)
-
     def test_post_400(self):
         source = UserSourceFactory(user=self.user)
 
@@ -648,7 +640,7 @@ class MappingVersionRetrieveViewTest(OCLAPITestCase):
     def test_get_200(self):
         latest_version = self.mapping.get_latest_version()
 
-        response = self.client.get(self.mapping.url + '{}/'.format(latest_version.id))
+        response = self.client.get(self.mapping.url + f'{latest_version.id}/')
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['is_latest_version'], True)

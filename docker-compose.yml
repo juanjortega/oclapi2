@@ -33,7 +33,7 @@ services:
       - ES_HOST=${ES_HOST-es}
       - ES_PORT=${ES_PORT-9200}
       - ENVIRONMENT=${ENVIRONMENT-production}
-      - DEBUG=True #needed to be able to serve staticfiles with Django server
+      - DEBUG=${DEBUG-FALSE}
       - SECRET_KEY
       - SENTRY_DSN_KEY
       - API_SUPERUSER_PASSWORD=${API_SUPERUSER_PASSWORD-Root123}
@@ -41,15 +41,24 @@ services:
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - API_INTERNAL_BASE_URL=${API_INTERNAL_BASE_URL-http://api:8000}
       - EMAIL_NOREPLY_PASSWORD
+<<<<<<< HEAD
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID-AAAA}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY-AAAA}
       - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME-AAAA}
       - AWS_REGION_NAME=${AWS_REGION_NAME-AAAA}
+=======
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_STORAGE_BUCKET_NAME
+      - AWS_REGION_NAME
+      - ERRBIT_URL
+      - ERRBIT_KEY
+>>>>>>> b6028633f129b8f8087156116ed285bcf817a7fc
     healthcheck:
       test: "curl --silent --fail http://localhost:8000/version/ || exit 1"
   celery:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
-    command: ["bash", "-c", "CELERY_WORKER_NAME=default ./start_celery_worker.sh -P prefork -Q default --autoscale=10,2"]
+    command: ["bash", "-c", "CELERY_WORKER_NAME=default ./start_celery_worker.sh -P prefork -Q default --autoscale=5,1"]
     restart: "always"
     depends_on:
       - redis    
@@ -58,15 +67,21 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+<<<<<<< HEAD
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID-AAAA}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY-AAAA}
       - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME-AAAA}
       - AWS_REGION_NAME=${AWS_REGION_NAME-AAAA}
+=======
+      - DEBUG=${DEBUG-FALSE}
+      - ERRBIT_URL
+      - ERRBIT_KEY
+>>>>>>> b6028633f129b8f8087156116ed285bcf817a7fc
   celery_indexing:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
-    command: ["bash", "-c", "CELERY_WORKER_NAME=indexing ./start_celery_worker.sh -P prefork -Q indexing --autoscale=10,2"]
+    command: ["bash", "-c", "CELERY_WORKER_NAME=indexing ./start_celery_worker.sh -P prefork -Q indexing --autoscale=2,1"]
     restart: "always"
     depends_on:
       - redis
@@ -75,11 +90,17 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+<<<<<<< HEAD
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
+=======
+      - DEBUG=${DEBUG-FALSE}
+      - ERRBIT_URL
+      - ERRBIT_KEY
+>>>>>>> b6028633f129b8f8087156116ed285bcf817a7fc
   celery_concurrent:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
-    command: ["bash", "-c", "CELERY_WORKER_NAME=concurrent ./start_celery_worker.sh -P prefork -Q concurrent -c 10"]
+    command: ["bash", "-c", "CELERY_WORKER_NAME=concurrent ./start_celery_worker.sh -P prefork -Q concurrent -c 5"]
     restart: "always"
     depends_on:
       - redis
@@ -88,8 +109,14 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+<<<<<<< HEAD
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
+=======
+      - DEBUG=${DEBUG-FALSE}
+      - ERRBIT_URL
+      - ERRBIT_KEY
+>>>>>>> b6028633f129b8f8087156116ed285bcf817a7fc
   celery_bulk_import_0_1:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_0_1 ./start_celery_worker.sh -Q bulk_import_0,bulk_import_1 -c 1"]
@@ -101,8 +128,14 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+<<<<<<< HEAD
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
+=======
+      - DEBUG=${DEBUG-FALSE}
+      - ERRBIT_URL
+      - ERRBIT_KEY
+>>>>>>> b6028633f129b8f8087156116ed285bcf817a7fc
   celery_bulk_import_2_3:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_2_3 ./start_celery_worker.sh -Q bulk_import_2,bulk_import_3 -c 1"]
@@ -114,8 +147,14 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+<<<<<<< HEAD
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
+=======
+      - DEBUG=${DEBUG-FALSE}
+      - ERRBIT_URL
+      - ERRBIT_KEY
+>>>>>>> b6028633f129b8f8087156116ed285bcf817a7fc
   celery_bulk_import_root:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "CELERY_WORKER_NAME=bulk_import_root ./start_celery_worker.sh -Q bulk_import_root -c 1"]
@@ -127,8 +166,14 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+<<<<<<< HEAD
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-False}
+=======
+      - DEBUG=${DEBUG-FALSE}
+      - ERRBIT_URL
+      - ERRBIT_KEY
+>>>>>>> b6028633f129b8f8087156116ed285bcf817a7fc
   flower:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     command: ["bash", "-c", "./start_flower.sh"]
