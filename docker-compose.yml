@@ -60,6 +60,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-FALSE}
       - ERRBIT_URL
       - ERRBIT_KEY
@@ -74,6 +75,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-FALSE}
       - ERRBIT_URL
       - ERRBIT_KEY
@@ -88,6 +90,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-FALSE}
       - ERRBIT_URL
       - ERRBIT_KEY
@@ -102,6 +105,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-FALSE}
       - ERRBIT_URL
       - ERRBIT_KEY
@@ -116,6 +120,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-FALSE}
       - ERRBIT_URL
       - ERRBIT_KEY
@@ -130,6 +135,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
+      - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - DEBUG=${DEBUG-FALSE}
       - ERRBIT_URL
       - ERRBIT_KEY
