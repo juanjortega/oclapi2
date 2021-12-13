@@ -164,6 +164,8 @@ services:
       memlock:
         soft: -1
         hard: -1
+    ports:
+      - 9200:9200
     volumes:
       - es-data:/usr/share/elasticsearch/data
     restart: "always"
