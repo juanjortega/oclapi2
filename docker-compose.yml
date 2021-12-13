@@ -14,6 +14,8 @@ services:
   redis:
     image: redis:6.0.6-alpine
     restart: "always"
+    ports:
+      - 6379:6379
     healthcheck:
       test: "redis-cli ping"
   api:
@@ -21,9 +23,6 @@ services:
     restart: "always"
     ports:
       - 8000:8000
-    depends_on:
-      - db
-      # do not depend on other services so tests and pylint uses less memory
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
@@ -40,7 +39,8 @@ services:
       - API_SUPERUSER_TOKEN=${API_SUPERUSER_TOKEN-891b4b17feab99f3ff7e5b5d04ccc5da7aa96da6}
       - API_BASE_URL=${API_BASE_URL-http://localhost:8000}
       - API_INTERNAL_BASE_URL=${API_INTERNAL_BASE_URL-http://api:8000}
-      - EMAIL_NOREPLY_PASSWORD
+      - EMAIL_HOST_PASSWORD=${EMAIL_HOST_PASSWORD}
+      - EMAIL_HOST_USER=${EMAIL_HOST_USER}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID-AAAA}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY-AAAA}
       - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME-AAAA}
