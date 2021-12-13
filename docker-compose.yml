@@ -23,9 +23,6 @@ services:
     restart: "always"
     ports:
       - 8000:8000
-    depends_on:
-      - db
-      # do not depend on other services so tests and pylint uses less memory
     environment:
       - REDIS_HOST=${REDIS_HOST-redis}
       - REDIS_PORT=${REDIS_PORT-6379}
