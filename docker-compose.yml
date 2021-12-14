@@ -50,6 +50,10 @@ services:
       - AWS_REGION_NAME=${AWS_REGION_NAME-AAAA}
       - ERRBIT_URL
       - ERRBIT_KEY
+      - FLOWER_USER=${FLOWER_USER-root}
+      - FLOWER_PASSWORD=${FLOWER_PASSWORD-Root123}
+      - FLOWER_HOST=${FLOWER_HOST-flower}
+      - FLOWER_PORT=${FLOWER_PORT-5555}
     healthcheck:
       test: "curl --silent --fail http://localhost:8000/version/ || exit 1"
   celery:
