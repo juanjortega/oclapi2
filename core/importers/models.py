@@ -14,7 +14,7 @@ from core.collections.models import Collection
 from core.common.constants import HEAD
 from core.common.services import RedisService
 from core.common.tasks import bulk_import_parts_inline, delete_organization
-from core.common.utils import drop_version, is_url_encoded_string, encode_string
+from core.common.utils import drop_version, is_url_encoded_string, encode_string, to_parent_uri
 from core.concepts.models import Concept
 from core.mappings.models import Mapping
 from core.orgs.models import Organization
@@ -460,20 +460,30 @@ class MappingImporter(BaseResourceImporter):
         if from_concept_code:
             filters['from_concept_code'] = from_concept_code
 
-        from_concept = Concept.objects.filter(id=F('versioned_object_id'), uri=drop_version(from_concept_url)).first()
+        versionless_from_concept_url = drop_version(from_concept_url)
+        from_concept = Concept.objects.filter(id=F('versioned_object_id'), uri=versionless_from_concept_url).first()
         if from_concept:
             filters['from_concept__versioned_object_id'] = from_concept.versioned_object_id
+        else:
+            filters['from_concept_code'] = compact(versionless_from_concept_url.split('/'))[-1]
         if to_concept_url:
-            to_concept = Concept.objects.filter(id=F('versioned_object_id'), uri=drop_version(to_concept_url)).first()
+            versionless_to_concept_url = drop_version(to_concept_url)
+            to_concept = Concept.objects.filter(id=F('versioned_object_id'), uri=versionless_to_concept_url).first()
             if to_concept:
                 filters['to_concept__versioned_object_id'] = to_concept.versioned_object_id
+            else:
+                filters['to_concept_code'] = compact(versionless_to_concept_url.split('/'))[-1]
+                if not to_source_url:
+                    filters['to_source__uri'] = to_parent_uri(versionless_to_concept_url)
 
         if self.get('id'):
             filters['mnemonic'] = self.get('id')
 
-        if to_concept_code and to_source_url:
-            filters['to_concept_code'] = to_concept_code
+        if to_source_url:
             filters['to_source__uri'] = drop_version(to_source_url)
+
+        if to_concept_code:
+            filters['to_concept_code'] = to_concept_code
 
         self.queryset = Mapping.objects.filter(**filters)
 

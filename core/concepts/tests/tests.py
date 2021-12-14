@@ -11,6 +11,8 @@ from core.concepts.constants import (
     OPENMRS_NO_MORE_THAN_ONE_SHORT_NAME_PER_LOCALE, CONCEPT_IS_ALREADY_RETIRED, CONCEPT_IS_ALREADY_NOT_RETIRED,
     OPENMRS_CONCEPT_CLASS, OPENMRS_DATATYPE, OPENMRS_DESCRIPTION_TYPE, OPENMRS_NAME_LOCALE, OPENMRS_DESCRIPTION_LOCALE)
 from core.concepts.models import Concept, LocalizedText
+from core.concepts.serializers import ConceptListSerializer, ConceptVersionListSerializer, ConceptDetailSerializer, \
+    ConceptVersionDetailSerializer, ConceptMinimalSerializer
 from core.concepts.tests.factories import LocalizedTextFactory, ConceptFactory
 from core.concepts.validators import ValidatorSpecifier
 from core.mappings.tests.factories import MappingFactory
@@ -847,34 +849,28 @@ class ConceptTest(OCLTestCase):
         MappingFactory(from_concept=concept1, to_concept=concept2, parent=source2)
 
         mappings = concept1.get_unidirectional_mappings()
-        self.assertEqual(mappings.count(), 2)
-        self.assertEqual(list(mappings), [mapping2, mapping1])
+        self.assertCountEqual(list(mappings), [mapping2, mapping1])
 
         mappings = concept1.get_indirect_mappings()
-        self.assertEqual(mappings.count(), 1)
-        self.assertEqual(list(mappings), [mapping4])
+        self.assertCountEqual(list(mappings), [mapping4])
 
         mappings = concept1.get_bidirectional_mappings()
-        self.assertEqual(mappings.count(), 3)
-        self.assertEqual(list(mappings), [mapping4, mapping2, mapping1])
+        self.assertCountEqual(list(mappings), [mapping4, mapping2, mapping1])
 
         mappings = concept2.get_unidirectional_mappings()
         self.assertEqual(mappings.count(), 0)
 
         mappings = concept2.get_indirect_mappings()
-        self.assertEqual(mappings.count(), 1)
-        self.assertEqual(list(mappings), [mapping1])
+        self.assertCountEqual(list(mappings), [mapping1])
 
         mappings = concept3.get_unidirectional_mappings()
         self.assertEqual(mappings.count(), 0)
 
         mappings = concept3.get_indirect_mappings()
-        self.assertEqual(mappings.count(), 1)
-        self.assertEqual(list(mappings), [mapping3])
+        self.assertCountEqual(list(mappings), [mapping3])
 
         mappings = concept4.get_unidirectional_mappings()
-        self.assertEqual(mappings.count(), 1)
-        self.assertEqual(list(mappings), [mapping5])
+        self.assertCountEqual(list(mappings), [mapping5])
 
         mappings = concept4.get_indirect_mappings()
         self.assertEqual(mappings.count(), 0)
@@ -979,6 +975,13 @@ class ConceptTest(OCLTestCase):
         self.assertEqual(
             list(child_child_concept.parent_concept_queryset().values_list('uri', flat=True)), [child_concept.uri])
         self.assertEqual(child_child_concept.parent_concept_urls, [child_concept.uri])
+
+    def test_get_serializer_class(self):
+        self.assertEqual(Concept.get_serializer_class(), ConceptListSerializer)
+        self.assertEqual(Concept.get_serializer_class(version=True), ConceptVersionListSerializer)
+        self.assertEqual(Concept.get_serializer_class(verbose=True), ConceptDetailSerializer)
+        self.assertEqual(Concept.get_serializer_class(verbose=True, version=True), ConceptVersionDetailSerializer)
+        self.assertEqual(Concept.get_serializer_class(brief=True), ConceptMinimalSerializer)
 
 
 class OpenMRSConceptValidatorTest(OCLTestCase):

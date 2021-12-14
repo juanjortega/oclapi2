@@ -11,14 +11,18 @@ from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.bundles.models import Bundle
+from core.bundles.serializers import BundleSerializer
 from core.common.constants import (
     HEAD, INCLUDE_INVERSE_MAPPINGS_PARAM, INCLUDE_RETIRED_PARAM, ACCESS_TYPE_NONE)
-from core.common.exceptions import Http409
+from core.common.exceptions import Http409, Http405
 from core.common.mixins import ListWithHeadersMixin, ConceptDictionaryMixin
 from core.common.swagger_parameters import (
     q_param, limit_param, sort_desc_param, page_param, exact_match_param, sort_asc_param, verbose_param,
     include_facets_header, updated_since_param, include_inverse_mappings_param, include_retired_param,
-    compress_header, include_source_versions_param, include_collection_versions_param)
+    compress_header, include_source_versions_param, include_collection_versions_param, cascade_method_param,
+    cascade_map_types_params, cascade_exclude_map_types_params, cascade_hierarchy_param, cascade_mappings_param,
+    include_mappings_param, cascade_levels_param)
 from core.common.tasks import delete_concept, make_hierarchy
 from core.common.utils import to_parent_uri_from_kwargs
 from core.common.views import SourceChildCommonBaseView, SourceChildExtrasView, \
@@ -280,6 +284,40 @@ class ConceptRetrieveUpdateDestroyView(ConceptBaseView, RetrieveAPIView, UpdateA
 
         parent.update_concepts_count()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ConceptCascadeView(ConceptBaseView):
+    serializer_class = BundleSerializer
+
+    def get_object(self, queryset=None):
+        if 'collection' in self.kwargs:
+            raise Http405()
+
+        queryset = self.get_queryset()
+        if 'concept_version' not in self.kwargs:
+            queryset = queryset.filter(id=F('versioned_object_id'))
+
+        instance = queryset.first()
+
+        if not instance:
+            raise Http404()
+
+        self.check_object_permissions(self.request, instance)
+        return instance
+
+    @swagger_auto_schema(
+        manual_parameters=[
+            cascade_method_param, cascade_map_types_params, cascade_exclude_map_types_params,
+            cascade_hierarchy_param, cascade_mappings_param, include_mappings_param, cascade_levels_param
+        ]
+    )
+    def get(self, request, **kwargs):  # pylint: disable=unused-argument
+        instance = self.get_object()
+        bundle = Bundle(
+            root=instance, params=self.request.query_params, verbose=self.is_verbose()
+        )
+        bundle.cascade()
+        return Response(BundleSerializer(bundle).data)
 
 
 class ConceptChildrenView(ConceptBaseView, ListWithHeadersMixin):
@@ -554,3 +592,37 @@ class ConceptsHierarchyAmendAdminView(APIView):  # pragma: no cover
             dict(state=result.state, username=request.user.username, task=result.task_id, queue='default'),
             status=status.HTTP_202_ACCEPTED
         )
+
+
+class ConceptDebugView(RetrieveAPIView, UpdateAPIView):  # pragma: no cover
+    permission_classes = (IsAdminUser, )
+    serializer_class = ConceptVersionDetailSerializer
+    lookup_field = 'id'
+    swagger_schema = None
+
+    def get_queryset(self):
+        return Concept.objects.filter(id=self.kwargs['id'])
+
+    def patch(self, request, *args, **kwargs):
+        mark_versioned = self.request.data.get('mark_versioned', False) in ['true', True]
+        connect_parent_version = self.request.data.get('connect_parent_version', False) in ['true', True]
+
+        concept = self.get_object()
+        versioned_object = None
+        try:
+            versioned_object = concept.versioned_object
+            if versioned_object:
+                print("Versioned Object Found: ", versioned_object.id)
+        except:  # pylint: disable=bare-except
+            pass
+        if mark_versioned:
+            if not versioned_object:
+                concept.id = concept.versioned_object_id
+                concept.save()
+        if connect_parent_version and versioned_object:
+            print("Existing Source versions:", versioned_object.sources.values_list('uri', flat=True))
+            print("Connecting Source Version...")
+            parent = versioned_object.parent
+            versioned_object.sources.add(parent)
+            concept.sources.add(parent)
+        return Response(status=status.HTTP_204_NO_CONTENT)

@@ -500,34 +500,42 @@ def index_source_mappings(source_id):
 @app.task
 def update_source_active_concepts_count(source_id):
     from core.sources.models import Source
-    sources = Source.objects.select_for_update().filter(id=source_id).first()
-    for source in sources:
+    source = Source.objects.filter(id=source_id).first()
+    if source:
+        before_active_concepts = source.active_concepts
         source.set_active_concepts()
-        source.save(update_fields=['active_concepts'])
+        if before_active_concepts != source.active_concepts:
+            source.save(update_fields=['active_concepts'])
 
 
 @app.task
 def update_source_active_mappings_count(source_id):
     from core.sources.models import Source
-    sources = Source.objects.select_for_update().filter(id=source_id).first()
-    for source in sources:
+    source = Source.objects.filter(id=source_id).first()
+    if source:
+        before_active_mappings = source.active_mappings
         source.set_active_mappings()
-        source.save(update_fields=['active_mappings'])
+        if before_active_mappings != source.active_mappings:
+            source.save(update_fields=['active_mappings'])
 
 
 @app.task
 def update_collection_active_concepts_count(collection_id):
     from core.collections.models import Collection
-    collections = Collection.objects.select_for_update().filter(id=collection_id)
-    for collection in collections:
+    collection = Collection.objects.filter(id=collection_id).first()
+    if collection:
+        before_active_concepts = collection.active_concepts
         collection.set_active_concepts()
-        collection.save(update_fields=['active_concepts'])
+        if before_active_concepts != collection.active_concepts:
+            collection.save(update_fields=['active_concepts'])
 
 
 @app.task
 def update_collection_active_mappings_count(collection_id):
     from core.collections.models import Collection
-    collections = Collection.objects.select_for_update().filter(id=collection_id).first()
-    for collection in collections:
+    collection = Collection.objects.filter(id=collection_id).first()
+    if collection:
+        before_active_mappings = collection.active_mappings
         collection.set_active_mappings()
-        collection.save(update_fields=['active_mappings'])
+        if before_active_mappings != collection.active_mappings:
+            collection.save(update_fields=['active_mappings'])
