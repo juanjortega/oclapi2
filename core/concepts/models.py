@@ -199,6 +199,7 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         'retired': {'sortable': False, 'filterable': True, 'facet': True},
         'source': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
         'collection': {'sortable': False, 'filterable': True, 'facet': True},
+        'collection_url': {'sortable': False, 'filterable': True, 'facet': True},
         'collection_owner_url': {'sortable': False, 'filterable': False, 'facet': True},
         'owner': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
         'owner_type': {'sortable': False, 'filterable': True, 'facet': True, 'exact': True},
@@ -774,26 +775,31 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         return self.__get_mappings_from_relation('mappings_to')
 
     def __get_mappings_from_relation(self, relation_manager, is_latest=False):
-        queryset = getattr(self, relation_manager).filter(parent_id=self.parent_id)
+        from core.mappings.models import Mapping
+        mappings = Mapping.objects.filter(parent_id=self.parent_id)
 
-        if self.is_versioned_object:
-            latest_version = self.get_latest_version()
-            if latest_version:
-                queryset |= getattr(latest_version, relation_manager).filter(parent_id=self.parent_id)
+        if relation_manager == 'mappings_from':
+            key = 'from_concept_id__in'
+        else:
+            key = 'to_concept_id__in'
+
+        filters = {key: [self.id]}
         if self.is_latest_version:
-            versioned_object = self.versioned_object
-            if versioned_object:
-                queryset |= getattr(versioned_object, relation_manager).filter(parent_id=self.parent_id)
+            filters[key].append(self.versioned_object_id)
+        elif self.is_versioned_object:
+            latest_version = self.get_latest_version()
+            filters[key].append(get(latest_version, 'id'))
+
+        filters[key] = compact(filters[key])
+
+        mappings = mappings.filter(**filters)
 
         if is_latest:
-            return queryset.filter(is_latest_version=True)
-
-        return queryset.filter(id=F('versioned_object_id')).order_by('-updated_at').distinct('updated_at')
+            return mappings.filter(is_latest_version=True)
+        return mappings.filter(id=F('versioned_object_id'))
 
     def get_bidirectional_mappings(self):
-        queryset = self.get_unidirectional_mappings() | self.get_indirect_mappings()
-
-        return queryset.distinct()
+        return self.get_unidirectional_mappings() | self.get_indirect_mappings()
 
     def get_bidirectional_mappings_for_collection(self, collection_url, collection_version=HEAD):
         queryset = self.get_unidirectional_mappings_for_collection(
@@ -836,20 +842,20 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
 
     @property
     def parent_concept_urls(self):
-        queryset = self.parent_concepts.all()
-        if self.is_latest_version:
-            queryset |= self.versioned_object.parent_concepts.all()
-        if self.is_versioned_object:
-            queryset |= self.get_latest_version().parent_concepts.all()
-        return self.__format_hierarchy_uris(queryset.values_list('uri', flat=True))
+        return self.__get_hierarchy_concept_urls('parent_concepts')
 
     @property
     def child_concept_urls(self):
-        queryset = self.child_concepts.all()
+        return self.__get_hierarchy_concept_urls('child_concepts')
+
+    def __get_hierarchy_concept_urls(self, relation):
+        queryset = get(self, relation).all()
         if self.is_latest_version:
-            queryset |= self.versioned_object.child_concepts.all()
+            queryset |= get(self.versioned_object, relation).all()
         if self.is_versioned_object:
-            queryset |= self.get_latest_version().child_concepts.all()
+            latest_version = self.get_latest_version()
+            if latest_version:
+                queryset |= get(latest_version, relation).all()
         return self.__format_hierarchy_uris(queryset.values_list('uri', flat=True))
 
     def child_concept_queryset(self):
@@ -882,3 +888,66 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         LocalizedText.objects.filter(name_locales=self).delete()
         LocalizedText.objects.filter(description_locales=self).delete()
         return super().delete(using=using, keep_parents=keep_parents)
+
+    def cascade(  # pylint: disable=too-many-arguments
+            self, source_mappings=True, source_to_concepts=True, mappings_criteria=None,
+            cascade_mappings=True, cascade_hierarchy=True, cascade_levels='*',
+            include_mappings=True, max_results=1000
+    ):
+        result = self.get_cascaded_resources(
+            source_mappings, source_to_concepts, mappings_criteria,
+            cascade_mappings, cascade_hierarchy, include_mappings
+        )
+        cascaded = [self.id]
+
+        def iterate(level):
+            if level == '*' or level > 0:
+                if (result['concepts'].count() + result['mappings'].count()) < max_results:
+                    not_cascaded = result['concepts'].exclude(id__in=cascaded)
+                    if not_cascaded.exists():
+                        for concept in not_cascaded:
+                            res = concept.get_cascaded_resources(
+                                source_mappings, source_to_concepts, mappings_criteria,
+                                cascade_mappings, cascade_hierarchy, include_mappings
+                            )
+                            cascaded.append(concept.id)
+                            result['concepts'] |= res['concepts']
+                            result['mappings'] |= res['mappings']
+                        iterate(level if level == '*' else level - 1)
+
+        iterate(cascade_levels)
+
+        return result
+
+    def get_cascaded_resources(  # pylint: disable=too-many-arguments
+            self, source_mappings=True, source_to_concepts=True, mappings_criteria=None,
+            cascade_mappings=True, cascade_hierarchy=True, include_mappings=True
+    ):
+        from core.mappings.models import Mapping
+        mappings = Mapping.objects.none()
+        result = dict(concepts=Concept.objects.filter(id=self.id), mappings=mappings)
+        mappings_criteria = mappings_criteria or Q()
+        if cascade_mappings and (source_mappings or source_to_concepts):
+            mappings = self.get_unidirectional_mappings().filter(mappings_criteria)
+            if include_mappings:
+                result['mappings'] = mappings
+        if source_to_concepts:
+            if mappings.exists():
+                result['concepts'] |= Concept.objects.filter(
+                    id__in=mappings.values_list('to_concept_id', flat=True), parent_id=self.parent_id)
+            if cascade_hierarchy:
+                result['concepts'] |= self.child_concept_queryset()
+
+        return result
+
+    @staticmethod
+    def get_serializer_class(verbose=False, version=False, brief=False):
+        if brief:
+            from core.concepts.serializers import ConceptMinimalSerializer
+            return ConceptMinimalSerializer
+        if version:
+            from core.concepts.serializers import ConceptVersionDetailSerializer, ConceptVersionListSerializer
+            return ConceptVersionDetailSerializer if verbose else ConceptVersionListSerializer
+
+        from core.concepts.serializers import ConceptDetailSerializer, ConceptListSerializer
+        return ConceptDetailSerializer if verbose else ConceptListSerializer

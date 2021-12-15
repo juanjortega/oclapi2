@@ -1,3 +1,43 @@
+##### 2.0.93 - Wed Dec 8 04:42:29 2021 +0000
+- Concept debug api to connect parent as source version
+- Concept parent concept urls errbit fix | refactoring
+- Concept debug api to log if versioned object exists
+- fixing pylint warning | typo
+- fixing pylint warning
+- Admin API to mark latest version as versioned object
+- Bundle resource_type -> type
+- POST pins to have correct created by id
+- [OpenConceptLab/ocl_issues#1131](https://github.com/OpenConceptLab/ocl_issues/issues/1131) | added concepts/mappings count
+- [OpenConceptLab/ocl_issues#1132](https://github.com/OpenConceptLab/ocl_issues/issues/1132) | concept/mapping | added collection url in ES for facets
+- [OpenConceptLab/ocl_issues#1131](https://github.com/OpenConceptLab/ocl_issues/issues/1131) | reducing iterations
+- [OpenConceptLab/ocl_issues#1131](https://github.com/OpenConceptLab/ocl_issues/issues/1131) | reducing max results to 500
+- [OpenConceptLab/ocl_issues#1127](https://github.com/OpenConceptLab/ocl_issues/issues/1127) | sorting coverage by cover percentage (asc)
+- [OpenConceptLab/ocl_issues#1131](https://github.com/OpenConceptLab/ocl_issues/issues/1131) | integration test for all cascade levels
+- [OpenConceptLab/ocl_issues#1131](https://github.com/OpenConceptLab/ocl_issues/issues/1131) | concept cascade performance | not loading concept parent
+- [OpenConceptLab/ocl_issues#1131](https://github.com/OpenConceptLab/ocl_issues/issues/1131) | concept cascade performance | simplifying concept mappings queryset
+- concept mappings removed distinct and order by clauses
+- [OpenConceptLab/ocl_issues#1122](https://github.com/OpenConceptLab/ocl_issues/issues/1122) | concept cascade | refactoring and cleaning up
+- [OpenConceptLab/ocl_issues#1122](https://github.com/OpenConceptLab/ocl_issues/issues/1122) | concept cascade | recrusion for nth level | limiting results and swagger parameters
+- [OpenConceptLab/ocl_issues#1126](https://github.com/OpenConceptLab/ocl_issues/issues/1126) | fixing source/collection summary save tasks
+- [OpenConceptLab/ocl_issues#1127](https://github.com/OpenConceptLab/ocl_issues/issues/1127) | coverage | fail under 85
+- [OpenConceptLab/ocl_issues#1122](https://github.com/OpenConceptLab/ocl_issues/issues/1122) | concept cascade | can cascade hierarchy (default true) and cascade mappings option (default true)
+##### 2.0.88 - Tue Nov 23 06:08:40 2021 +0000
+- [OpenConceptLab/ocl_issues#1122](https://github.com/OpenConceptLab/ocl_issues/issues/1122) | concept cascade | swagger query parameters
+- [OpenConceptLab/ocl_issues#1122](https://github.com/OpenConceptLab/ocl_issues/issues/1122) | concept cascade | excludeMapTypes filter
+- [OpenConceptLab/ocl_issues#1126](https://github.com/OpenConceptLab/ocl_issues/issues/1126) | children concept urls queryset fix
+- [OpenConceptLab/ocl_issues#1126](https://github.com/OpenConceptLab/ocl_issues/issues/1126) | fixing authored report when payload is none
+- [OpenConceptLab/ocl_issues#1126](https://github.com/OpenConceptLab/ocl_issues/issues/1126) | parenless children queryset fix
+- [OpenConceptLab/ocl_issues#1127](https://github.com/OpenConceptLab/ocl_issues/issues/1127) | coverage | setting coverage directory
+- [OpenConceptLab/ocl_issues#1088](https://github.com/OpenConceptLab/ocl_issues/issues/1088) | bundle | added timestamp and concept/mapping type in response
+- Adding API_IMAGE variable to docker-compose.ci
+- Fixing Dockerfile to use cache
+- [OpenConceptLab/ocl_issues#1088](https://github.com/OpenConceptLab/ocl_issues/issues/1088) | bundle | removed bundle type
+- [OpenConceptLab/ocl_issues#1088](https://github.com/OpenConceptLab/ocl_issues/issues/1088) | bundle | not returning id and timestamp
+##### 2.0.85 - Fri Nov 19 10:17:43 2021 +0000
+- [OpenConceptLab/ocl_issues#1088](https://github.com/OpenConceptLab/ocl_issues/issues/1088) | bundle | default response is brief
+- exact match facets to encode special characters in search string
+- [OpenConceptLab/ocl_issues#1088](https://github.com/OpenConceptLab/ocl_issues/issues/1088) | concept  operation with bundle and ocl response
+- Source/Collection counts update | making sure save is called when counts change
 ##### 2.0.82 - Sun Nov 14 13:30:38 2021 +0000
 - ES | search request timeout
 - Errbit Client | xml escaping url string

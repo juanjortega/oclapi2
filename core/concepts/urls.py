@@ -11,6 +11,17 @@ urlpatterns = [
         name='concept-detail'
     ),
     path(
+        "<str:concept>/$cascade/",
+        views.ConceptCascadeView.as_view(),
+        name='concept-$cascade'
+    ),
+    # duplicate due to swagger not accepting $cascade
+    path(
+        "<str:concept>/cascade/",
+        views.ConceptCascadeView.as_view(),
+        name='concept-cascade'
+    ),
+    path(
         "<str:concept>/collection-versions/",
         views.ConceptCollectionMembershipView.as_view(),
         name='concept-collection-versions'
@@ -80,6 +91,17 @@ urlpatterns = [
         '<str:concept>/<str:concept_version>/',
         views.ConceptVersionRetrieveView.as_view(),
         name='concept-version-detail'
+    ),
+    path(
+        "<str:concept>/<str:concept_version>/$cascade/",
+        views.ConceptCascadeView.as_view(),
+        name='concept-version-$cascade'
+    ),
+    # duplicate due to swagger not accepting $cascade
+    path(
+        "<str:concept>/<str:concept_version>/cascade/",
+        views.ConceptCascadeView.as_view(),
+        name='concept-version-cascade'
     ),
     path(
         '<str:concept>/<str:concept_version>/collection-versions/',
