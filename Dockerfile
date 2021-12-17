@@ -16,6 +16,8 @@ RUN pip wheel --no-cache-dir --wheel-dir /code/wheels -r requirements.txt
 FROM python:3.9.6-alpine
 ENV PYTHONUNBUFFERED 1
 ENV PYTHONDONTWRITEBYTECODE 1
+ARG SECRET_KEY
+ENV SECRET_KEY=$SECRET_KEY
 
 RUN addgroup -S ocl && adduser -S ocl -G ocl
 

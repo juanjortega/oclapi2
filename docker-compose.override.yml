@@ -12,7 +12,10 @@ services:
       - 6379:6379
     restart: "no"
   api:
-    build: .
+    build:
+        context: .
+        args:
+            SECRET_KEY: ${SECRET_KEY}
     ports:
       - 8000:8000
     volumes:
