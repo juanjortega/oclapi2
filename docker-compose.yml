@@ -6,7 +6,7 @@ services:
     restart: "always"
     shm_size: "128mb"
     volumes:
-        - master-db:/var/lib/postgresql/data
+        - ./postgres-data/data:/var/lib/postgresql/data
     environment:
       - POSTGRES_PASSWORD=${DB_PASSWORD-Postgres123}
     healthcheck:
@@ -171,7 +171,7 @@ services:
     ports:
       - 9200:9200
     volumes:
-      - es-data:/usr/share/elasticsearch/data
+      - ./es-data/data:/usr/share/elasticsearch/data
     restart: "always"
     healthcheck:
       test: "curl --silent --fail http://localhost:9200/_cluster/health || exit 1"

@@ -46,6 +46,8 @@ API_SUPERUSER_TOKEN=1df23g4h5j67zz
 #### Puesta en Marcha
 
 ```bash
+mkdir es-data/data
+mkdir postgres/data
 docker-compose up -d
 docker exec -it oclapi2_api_1 python manage.py search_index --rebuild -f --parallel
 ```
