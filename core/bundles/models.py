@@ -4,7 +4,7 @@ from pydash import compact, get
 from core.bundles.constants import BUNDLE_TYPE_SEARCHSET, RESOURCE_TYPE
 from core.collections.constants import SOURCE_MAPPINGS, SOURCE_TO_CONCEPTS
 from core.common.constants import INCLUDE_MAPPINGS_PARAM, CASCADE_LEVELS_PARAM, CASCADE_MAPPINGS_PARAM, \
-    CASCADE_HIERARCHY_PARAM, CASCADE_METHOD_PARAM, MAP_TYPES_PARAM, EXCLUDE_MAP_TYPES_PARAM
+    CASCADE_HIERARCHY_PARAM, CASCADE_METHOD_PARAM, MAP_TYPES_PARAM, EXCLUDE_MAP_TYPES_PARAM, CASCADE_DIRECTION_PARAM
 
 
 class Bundle:
@@ -13,6 +13,7 @@ class Bundle:
         self.brief = not verbose
         self.root = root
         self.params = params
+        self.reverse = False
         self.cascade_hierarchy = True
         self.cascade_mappings = True
         self.cascade_levels = '*'
@@ -27,12 +28,17 @@ class Bundle:
         self.entries = []
 
     def set_cascade_parameters(self):
+        self.set_cascade_direction()
         self.set_cascade_method()
         self.set_cascade_hierarchy()
         self.set_cascade_mappings()
         self.set_cascade_mappings_criteria()
         self.set_cascade_levels()
         self.set_include_mappings()
+
+    @property
+    def is_hierarchy_view(self):
+        return self.params.get('view', '').lower() == 'hierarchy'
 
     def set_include_mappings(self):
         if INCLUDE_MAPPINGS_PARAM in self.params:
@@ -55,6 +61,10 @@ class Bundle:
     def set_cascade_method(self):
         if CASCADE_METHOD_PARAM in self.params:
             self.cascade_method = self.params.get(CASCADE_METHOD_PARAM, '').lower()
+
+    def set_cascade_direction(self):
+        if CASCADE_DIRECTION_PARAM in self.params:
+            self.reverse = self.params[CASCADE_DIRECTION_PARAM] in ['true', True]
 
     def set_cascade_mappings_criteria(self):
         map_types = self.params.dict().get(MAP_TYPES_PARAM, None)
@@ -92,6 +102,12 @@ class Bundle:
         self._total = self.concepts_count + self.mappings_count
 
     def cascade(self):
+        if self.is_hierarchy_view:
+            self.cascade_as_hierarchy()
+        else:
+            self.cascade_flat()
+
+    def cascade_flat(self):
         self.set_cascade_parameters()
         result = self.root.cascade(
             source_mappings=self.cascade_method == SOURCE_MAPPINGS,
@@ -101,16 +117,41 @@ class Bundle:
             cascade_hierarchy=self.cascade_hierarchy,
             cascade_levels=self.cascade_levels,
             include_mappings=self.include_mappings,
+            reverse=self.reverse
         )
         self.concepts = get(result, 'concepts')
         self.mappings = get(result, 'mappings')
         self.set_total()
         self.set_entries()
 
+    def cascade_as_hierarchy(self):
+        self.set_cascade_parameters()
+        self.root.cascade_as_hierarchy(
+            source_mappings=self.cascade_method == SOURCE_MAPPINGS,
+            source_to_concepts=self.cascade_method == SOURCE_TO_CONCEPTS,
+            mappings_criteria=self.mappings_criteria,
+            cascade_mappings=self.cascade_mappings,
+            cascade_hierarchy=self.cascade_hierarchy,
+            cascade_levels=self.cascade_levels,
+            include_mappings=self.include_mappings,
+            reverse=self.reverse
+        )
+
+        from core.concepts.serializers import ConceptMinimalSerializerRecursive
+        self.entries = ConceptMinimalSerializerRecursive(
+            self.root, context=dict(request=dict(query_params=self.params))).data
+
     def set_entries(self):
+        self.entries += self.get_concept_serializer()(self.concepts, many=True).data
+        self.entries += self.get_mapping_serializer()(self.mappings, many=True).data
+
+    def get_mapping_serializer(self):
+        from core.mappings.models import Mapping
+        serializer = Mapping.get_serializer_class(
+            verbose=self.verbose, version=True, brief=self.brief, reverse=self.reverse)
+        return serializer
+
+    def get_concept_serializer(self):
         from core.concepts.models import Concept
         serializer = Concept.get_serializer_class(verbose=self.verbose, version=True, brief=self.brief)
-        self.entries += serializer(self.concepts, many=True).data
-        from core.mappings.models import Mapping
-        serializer = Mapping.get_serializer_class(verbose=self.verbose, version=True, brief=self.brief)
-        self.entries += serializer(self.mappings, many=True).data
+        return serializer

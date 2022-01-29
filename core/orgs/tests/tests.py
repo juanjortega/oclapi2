@@ -1,7 +1,7 @@
 from django.core.exceptions import ValidationError
 from mock import patch, Mock
 
-from core.collections.models import Collection, CollectionReference
+from core.collections.models import Collection, CollectionReference, Expansion
 from core.common.constants import ACCESS_TYPE_NONE, HEAD
 from core.common.tasks import delete_organization
 from core.common.tests import OCLTestCase
@@ -10,15 +10,19 @@ from core.concepts.tests.factories import ConceptFactory
 from core.mappings.models import Mapping
 from core.mappings.tests.factories import MappingFactory
 from core.orgs.constants import ORG_OBJECT_TYPE
+from core.orgs.documents import OrganizationDocument
 from core.orgs.models import Organization
 from core.orgs.tests.factories import OrganizationFactory
 from core.sources.models import Source
 from core.sources.tests.factories import OrganizationSourceFactory
-from core.collections.tests.factories import OrganizationCollectionFactory
+from core.collections.tests.factories import OrganizationCollectionFactory, ExpansionFactory
 from core.users.tests.factories import UserProfileFactory
 
 
 class OrganizationTest(OCLTestCase):
+    def test_get_search_document(self):
+        self.assertEqual(Organization.get_search_document(), OrganizationDocument)
+
     def test_resource_type(self):
         self.assertEqual(Organization().resource_type, ORG_OBJECT_TYPE)
 
@@ -129,12 +133,16 @@ class OrganizationTest(OCLTestCase):
         self.assertTrue(source.is_active)
         self.assertTrue(collection.is_active)
 
-    def test_delete_organization_task(self):
+    @patch('core.common.models.delete_s3_objects')
+    def test_delete_organization_task(self, delete_s3_objects_mock):
         org = OrganizationFactory(mnemonic='to-be-deleted-org')
         source = OrganizationSourceFactory(mnemonic='to-be-deleted-source', organization=org)
         collection = OrganizationCollectionFactory(mnemonic='to-be-deleted-coll', organization=org)
         concept = ConceptFactory(mnemonic='to-be-deleted-concept', parent=source)
         mapping = MappingFactory(mnemonic='to-be-deleted-mapping', parent=source)
+        expansion = ExpansionFactory(collection_version=collection)
+        collection.expansion_uri = expansion.uri
+        collection.save()
         collection.add_references([concept.uri, mapping.uri])
 
         self.assertEqual(org.source_set.count(), 1)
@@ -142,8 +150,8 @@ class OrganizationTest(OCLTestCase):
         self.assertEqual(source.concepts_set.count(), 2)
         self.assertEqual(source.mappings_set.count(), 2)
         self.assertEqual(collection.references.count(), 2)
-        self.assertEqual(collection.concepts.count(), 1)
-        self.assertEqual(collection.mappings.count(), 1)
+        self.assertEqual(collection.expansion.concepts.count(), 1)
+        self.assertEqual(collection.expansion.mappings.count(), 1)
 
         delete_organization(0)
 
@@ -157,6 +165,8 @@ class OrganizationTest(OCLTestCase):
         self.assertFalse(Concept.objects.filter(mnemonic='to-be-deleted-concept').exists())
         self.assertFalse(Mapping.objects.filter(mnemonic='to-be-deleted-mapping').exists())
         self.assertEqual(CollectionReference.objects.count(), 0)
+        self.assertEqual(Expansion.objects.count(), 0)
+        delete_s3_objects_mock.delay.assert_called()
 
     def test_logo_url(self):
         self.assertIsNone(Organization(logo_path=None).logo_url)

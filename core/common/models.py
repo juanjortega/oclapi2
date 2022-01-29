@@ -14,15 +14,17 @@ from django_elasticsearch_dsl.signals import RealTimeSignalProcessor
 from pydash import get
 
 from core.common.services import S3
-from core.common.tasks import update_collection_active_concepts_count, update_collection_active_mappings_count
+from core.common.tasks import update_collection_active_concepts_count, update_collection_active_mappings_count, \
+    delete_s3_objects
 from core.common.utils import reverse_resource, reverse_resource_version, parse_updated_since_param, drop_version
+from core.common.utils import to_owner_uri
 from core.settings import DEFAULT_LOCALE
 from .constants import (
     ACCESS_TYPE_CHOICES, DEFAULT_ACCESS_TYPE, NAMESPACE_REGEX,
     ACCESS_TYPE_VIEW, ACCESS_TYPE_EDIT, SUPER_ADMIN_USER_ID,
     HEAD, PERSIST_NEW_ERROR_MESSAGE, SOURCE_PARENT_CANNOT_BE_NONE, PARENT_RESOURCE_CANNOT_BE_NONE,
     CREATOR_CANNOT_BE_NONE, CANNOT_DELETE_ONLY_VERSION, CUSTOM_VALIDATION_SCHEMA_OPENMRS)
-from .tasks import handle_save, handle_m2m_changed, seed_children, update_validation_schema, \
+from .tasks import handle_save, handle_m2m_changed, seed_children_to_new_version, update_validation_schema, \
     update_source_active_concepts_count, update_source_active_mappings_count
 
 
@@ -347,12 +349,20 @@ class ConceptContainerModel(VersionedModel):
     snapshot = models.JSONField(null=True, blank=True, default=dict)
     experimental = models.BooleanField(null=True, blank=True, default=None)
     meta = models.JSONField(null=True, blank=True)
-    active_concepts = models.IntegerField(default=0)
-    active_mappings = models.IntegerField(default=0)
+    active_concepts = models.IntegerField(null=True, blank=True, default=None)
+    active_mappings = models.IntegerField(null=True, blank=True, default=None)
 
     class Meta:
         abstract = True
         indexes = [] + VersionedModel.Meta.indexes
+
+    @property
+    def should_set_active_concepts(self):
+        return self.active_concepts is None
+
+    @property
+    def should_set_active_mappings(self):
+        return self.active_mappings is None
 
     @property
     def is_openmrs_schema(self):
@@ -379,12 +389,6 @@ class ConceptContainerModel(VersionedModel):
             update_source_active_concepts_count.apply_async((self.id,), queue='concurrent')
         elif self.__class__.__name__ == 'Collection':
             update_collection_active_concepts_count.apply_async((self.id,), queue='concurrent')
-
-    def set_active_concepts(self):
-        self.active_concepts = self.concepts.filter(retired=False, is_active=True).count()
-
-    def set_active_mappings(self):
-        self.active_mappings = self.mappings.filter(retired=False, is_active=True).count()
 
     @property
     def last_concept_update(self):
@@ -448,7 +452,7 @@ class ConceptContainerModel(VersionedModel):
 
     @property
     def parent_url(self):
-        return get(self, 'parent.url')
+        return to_owner_uri(self.uri)
 
     @property
     def parent_resource(self):
@@ -465,31 +469,29 @@ class ConceptContainerModel(VersionedModel):
         ).order_by('-created_at')
 
     def delete(self, using=None, keep_parents=False, force=False):  # pylint: disable=arguments-differ
-        generic_export_path = self.generic_export_path(suffix=None)
-
         if self.is_head:
             self.versions.exclude(id=self.id).delete()
-        else:
-            if self.is_latest_version:
-                prev_version = self.prev_version
-                if not force and not prev_version:
-                    raise ValidationError(dict(detail=CANNOT_DELETE_ONLY_VERSION))
-                if prev_version:
-                    prev_version.is_latest_version = True
-                    prev_version.save()
+        elif self.is_latest_version:
+            prev_version = self.prev_version
+            if not force and not prev_version:
+                raise ValidationError(dict(detail=CANNOT_DELETE_ONLY_VERSION))
+            if prev_version:
+                prev_version.is_latest_version = True
+                prev_version.save()
 
-        from core.pins.models import Pin
-        Pin.objects.filter(resource_type__model=self.resource_type.lower(), resource_id=self.id).delete()
+        self.delete_pins()
 
+        generic_export_path = self.generic_export_path(suffix=None)
         super().delete(using=using, keep_parents=keep_parents)
-        S3.delete_objects(generic_export_path)
+        delete_s3_objects.delay(generic_export_path)
+
+    def delete_pins(self):
+        if self.is_head:
+            from core.pins.models import Pin
+            Pin.objects.filter(resource_type__model=self.resource_type.lower(), resource_id=self.id).delete()
 
     def get_active_concepts(self):
         return self.get_concepts_queryset().filter(is_active=True, retired=False)
-
-    @property
-    def num_concepts(self):
-        return self.get_concepts_queryset().count()
 
     def get_concepts_queryset(self):
         return self.concepts_set.filter(id=F('versioned_object_id'))
@@ -522,12 +524,20 @@ class ConceptContainerModel(VersionedModel):
             self.user = parent_resource
 
     @staticmethod
+    def cascade_children_to_expansion(**kwargs):
+        pass
+
+    @staticmethod
     def update_mappings():
         pass
 
     @staticmethod
     def seed_references():
         pass
+
+    @property
+    def should_auto_expand(self):
+        return True
 
     @classmethod
     def persist_new(cls, obj, created_by, **kwargs):
@@ -557,6 +567,8 @@ class ConceptContainerModel(VersionedModel):
         try:
             obj.save(**kwargs)
             obj.update_mappings()
+            if obj.should_auto_expand:
+                obj.cascade_children_to_expansion(index=False)
             persisted = True
         except IntegrityError as ex:
             errors.update({'__all__': ex.args})
@@ -577,16 +589,15 @@ class ConceptContainerModel(VersionedModel):
             obj.created_by = user
             obj.updated_by = user
         serializer = SourceDetailSerializer if obj.__class__.__name__ == 'Source' else CollectionDetailSerializer
-        obj.snapshot = serializer(obj.head).data
-        obj.update_version_data()
+        head = obj.head
+        obj.snapshot = serializer(head).data
+        obj.update_version_data(head)
         obj.save(**kwargs)
 
         if get(settings, 'TEST_MODE', False):
-            obj.seed_concepts()
-            obj.seed_mappings()
-            obj.seed_references()
+            seed_children_to_new_version(obj.resource_type.lower(), obj.id, False)
         else:
-            seed_children.delay(obj.resource_type.lower(), obj.id)
+            seed_children_to_new_version.delay(obj.resource_type.lower(), obj.id)
 
         if obj.id:
             obj.sibling_versions.update(is_latest_version=False)
@@ -650,60 +661,28 @@ class ConceptContainerModel(VersionedModel):
 
         return failed_concept_validations
 
-    def update_version_data(self, obj=None):
-        if obj:
-            self.description = obj.description
-        else:
-            obj = self.get_latest_version()
-
-        if obj:
-            self.name = obj.name
-            self.full_name = obj.full_name
-            self.website = obj.website
-            self.public_access = obj.public_access
-            self.supported_locales = obj.supported_locales
-            self.default_locale = obj.default_locale
-            self.external_id = obj.external_id
-            self.organization = obj.organization
-            self.user = obj.user
-            self.canonical_url = obj.canonical_url
-
-    def seed_concepts(self, index=True):
-        head = self.head
-        if head:
-            from core.sources.models import Source
-            if self.__class__ == Source:
-                concepts = head.concepts.filter(is_latest_version=True)
-            else:
-                concepts = head.concepts.all()
-
-            self.concepts.set(concepts)
-            self.update_concepts_count()
-            if index:
-                from core.concepts.documents import ConceptDocument
-                self.batch_index(self.concepts, ConceptDocument)
-
-    def seed_mappings(self, index=True):
-        head = self.head
-        if head:
-            from core.sources.models import Source
-            if self.__class__ == Source:
-                mappings = head.mappings.filter(is_latest_version=True)
-            else:
-                mappings = head.mappings.all()
-
-            self.mappings.set(mappings)
-            self.update_mappings_count()
-            if index:
-                from core.mappings.documents import MappingDocument
-                self.batch_index(self.mappings, MappingDocument)
-
-    def index_children(self):
-        from core.concepts.documents import ConceptDocument
-        from core.mappings.documents import MappingDocument
-
-        self.batch_index(self.concepts, ConceptDocument)
-        self.batch_index(self.mappings, MappingDocument)
+    def update_version_data(self, head):
+        self.description = self.description or head.description
+        self.name = head.name
+        self.full_name = head.full_name
+        self.website = head.website
+        self.public_access = head.public_access
+        self.supported_locales = head.supported_locales
+        self.default_locale = head.default_locale
+        self.external_id = head.external_id
+        self.organization = head.organization
+        self.user = head.user
+        self.canonical_url = head.canonical_url
+        self.identifier = head.identifier
+        self.contact = head.contact
+        self.jurisdiction = head.jurisdiction
+        self.publisher = head.publisher
+        self.purpose = head.purpose
+        self.copyright = head.copyright
+        self.revision_date = head.revision_date
+        self.text = head.text
+        self.experimental = head.experimental
+        self.custom_validation_schema = head.custom_validation_schema
 
     def add_processing(self, process_id):
         if self.id:

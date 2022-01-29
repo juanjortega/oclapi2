@@ -12,6 +12,7 @@ from pydash import get
 
 from core.celery import app
 from core.common.constants import CONFIRM_EMAIL_ADDRESS_MAIL_SUBJECT, PASSWORD_RESET_MAIL_SUBJECT
+from core.common.services import S3
 from core.common.utils import write_export_file, web_url, get_resource_class_from_resource_name
 
 logger = get_task_logger(__name__)
@@ -56,6 +57,27 @@ def delete_source(source_id):
         return True
     except Exception as ex:
         logger.info('Source delete failed for %s with exception %s', source.mnemonic, ex.args)
+        return ex
+
+
+@app.task(base=QueueOnce)
+def delete_collection(collection_id):
+    from core.collections.models import Collection
+    logger.info('Finding collection...')
+
+    collection = Collection.objects.filter(id=collection_id).first()
+
+    if not collection:
+        logger.info('Not found collection %s', collection_id)
+        return None
+
+    try:
+        logger.info('Found collection %s.  Beginning purge...', collection.mnemonic)
+        collection.delete(force=True)
+        logger.info('Delete complete!')
+        return True
+    except Exception as ex:
+        logger.info('Collection delete failed for %s with exception %s', collection.mnemonic, ex.args)
         return ex
 
 
@@ -261,18 +283,22 @@ def send_user_reset_password_email(user_id):
 
 
 @app.task(bind=True)
-def seed_children(self, resource, obj_id, export=True):
+def seed_children_to_new_version(self, resource, obj_id, export=True):
     instance = None
     export_task = None
+    autoexpand = True
+    is_source = resource == 'source'
+    is_collection = resource == 'collection'
 
-    if resource == 'source':
+    if is_source:
         from core.sources.models import Source
         instance = Source.objects.filter(id=obj_id).first()
         export_task = export_source
-    if resource == 'collection':
+    if is_collection:
         from core.collections.models import Collection
         instance = Collection.objects.filter(id=obj_id).first()
         export_task = export_collection
+        autoexpand = instance.should_auto_expand
 
     if instance:
         task_id = self.request.id
@@ -281,15 +307,27 @@ def seed_children(self, resource, obj_id, export=True):
 
         try:
             instance.add_processing(task_id)
-            instance.seed_concepts(index=index)
-            instance.seed_mappings(index=index)
             instance.seed_references()
+            if is_source:
+                instance.seed_concepts(index=index)
+                instance.seed_mappings(index=index)
+            elif autoexpand:
+                instance.cascade_children_to_expansion(index=index)
 
             if export:
                 export_task.delay(obj_id)
-                instance.index_children()
+                if autoexpand:
+                    instance.index_children()
         finally:
             instance.remove_processing(task_id)
+
+
+@app.task
+def seed_children_to_expansion(expansion_id, index=True):
+    from core.collections.models import Expansion
+    expansion = Expansion.objects.filter(id=expansion_id).first()
+    if expansion:
+        expansion.seed_children(index=index)
 
 
 @app.task
@@ -457,6 +495,24 @@ def batch_index_resources(resource, filters):
 
 
 @app.task
+def index_expansion_concepts(expansion_id):
+    from core.collections.models import Expansion
+    expansion = Expansion.objects.filter(id=expansion_id).first()
+    if expansion:
+        from core.concepts.documents import ConceptDocument
+        expansion.batch_index(expansion.concepts, ConceptDocument)
+
+
+@app.task
+def index_expansion_mappings(expansion_id):
+    from core.collections.models import Expansion
+    expansion = Expansion.objects.filter(id=expansion_id).first()
+    if expansion:
+        from core.mappings.documents import MappingDocument
+        expansion.batch_index(expansion.mappings, MappingDocument)
+
+
+@app.task
 def make_hierarchy(concept_map):  # pragma: no cover
     from core.concepts.models import Concept
 
@@ -539,3 +595,9 @@ def update_collection_active_mappings_count(collection_id):
         collection.set_active_mappings()
         if before_active_mappings != collection.active_mappings:
             collection.save(update_fields=['active_mappings'])
+
+
+@app.task
+def delete_s3_objects(path):
+    if path:
+        S3.delete_objects(path)

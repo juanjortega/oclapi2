@@ -95,16 +95,16 @@ class Source(ConceptContainerModel):
     def source(self):
         return self.mnemonic
 
-    def update_version_data(self, obj=None):
-        super().update_version_data(obj)
-        if not obj:
-            obj = self.get_latest_version()
-
-        if obj:
-            self.source_type = obj.source_type
-            self.custom_validation_schema = obj.custom_validation_schema
-            self.hierarchy_meaning = obj.hierarchy_meaning
-            self.hierarchy_root_id = obj.hierarchy_root_id
+    def update_version_data(self, head):
+        super().update_version_data(head)
+        self.source_type = head.source_type
+        self.content_type = head.content_type
+        self.collection_reference = head.collection_reference
+        self.hierarchy_meaning = head.hierarchy_meaning
+        self.hierarchy_root_id = head.hierarchy_root_id
+        self.case_sensitive = head.case_sensitive
+        self.compositional = head.compositional
+        self.version_needed = head.version_needed
 
     def get_concept_name_locales(self):
         return LocalizedText.objects.filter(name_locales__in=self.get_active_concepts())
@@ -115,7 +115,7 @@ class Source(ConceptContainerModel):
         if origin_source.custom_validation_schema == self.custom_validation_schema:
             return False
 
-        return self.custom_validation_schema is not None and self.num_concepts > 0
+        return self.custom_validation_schema is not None and self.active_concepts
 
     def update_mappings(self):
         from core.mappings.models import Mapping
@@ -156,10 +156,10 @@ class Source(ConceptContainerModel):
         if hierarchy_root:
             adjusted_limit -= 1
         parent_less_children = parent_less_children.order_by('mnemonic')[offset:adjusted_limit+offset]
+
+        children = []
         if parent_less_children.exists():
             children = ConceptHierarchySerializer(parent_less_children, many=True).data
-        else:
-            children = []
 
         if hierarchy_root:
             children.append({**ConceptHierarchySerializer(hierarchy_root).data, 'root': True})
@@ -175,11 +175,34 @@ class Source(ConceptContainerModel):
     def set_active_concepts(self):
         queryset = self.concepts.filter(retired=False, is_active=True)
         if self.is_head:
-            queryset = queryset.filter(is_latest_version=True)
+            queryset = queryset.filter(id=F('versioned_object_id'))
         self.active_concepts = queryset.count()
 
     def set_active_mappings(self):
         queryset = self.mappings.filter(retired=False, is_active=True)
         if self.is_head:
-            queryset = queryset.filter(is_latest_version=True)
+            queryset = queryset.filter(id=F('versioned_object_id'))
         self.active_mappings = queryset.count()
+
+    def seed_concepts(self, index=True):
+        head = self.head
+        if head:
+            self.concepts.set(head.concepts.filter(is_latest_version=True))
+            if index:
+                from core.concepts.documents import ConceptDocument
+                self.batch_index(self.concepts, ConceptDocument)
+
+    def seed_mappings(self, index=True):
+        head = self.head
+        if head:
+            self.mappings.set(head.mappings.filter(is_latest_version=True))
+            if index:
+                from core.mappings.documents import MappingDocument
+                self.batch_index(self.mappings, MappingDocument)
+
+    def index_children(self):
+        from core.concepts.documents import ConceptDocument
+        from core.mappings.documents import MappingDocument
+
+        self.batch_index(self.concepts, ConceptDocument)
+        self.batch_index(self.mappings, MappingDocument)

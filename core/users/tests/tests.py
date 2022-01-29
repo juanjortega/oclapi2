@@ -1,3 +1,6 @@
+from datetime import datetime
+
+from django.contrib.auth.models import Group
 from mock import Mock, patch, ANY
 from rest_framework.authtoken.models import Token
 
@@ -7,7 +10,8 @@ from core.common.tasks import send_user_verification_email, send_user_reset_pass
 from core.common.tests import OCLTestCase, OCLAPITestCase
 from core.orgs.models import Organization
 from core.sources.tests.factories import OrganizationSourceFactory
-from core.users.constants import USER_OBJECT_TYPE
+from core.users.constants import USER_OBJECT_TYPE, OCL_SERVERS_GROUP
+from core.users.documents import UserProfileDocument
 from core.users.models import UserProfile
 from core.users.tests.factories import UserProfileFactory
 
@@ -58,6 +62,15 @@ class UserProfileTest(OCLTestCase):
     def test_user(self):
         self.assertEqual(UserProfile().user, '')
         self.assertEqual(UserProfile(username='foo').user, 'foo')
+
+    def test_get_search_document(self):
+        self.assertEqual(UserProfile.get_search_document(), UserProfileDocument)
+
+    def test_status(self):
+        self.assertEqual(UserProfile(is_active=True, verified=True).status, 'verified')
+        self.assertEqual(UserProfile(is_active=True, verified=False).status, 'unverified')
+        self.assertEqual(UserProfile(is_active=False, verified=True).status, 'deactivated')
+        self.assertEqual(UserProfile(is_active=False, verified=False).status, 'deactivated')
 
     @patch('core.users.models.UserProfile.source_set')
     def test_public_sources(self, source_set_mock):
@@ -204,16 +217,51 @@ class UserProfileTest(OCLTestCase):
         self.assertIsNone(user.verification_token)
         user.save.assert_not_called()
 
+    def test_auth_groups(self):
+        user = UserProfileFactory()
+        self.assertEqual(user.auth_groups.count(), 0)
+
+        user.groups.add(Group.objects.get(name=OCL_SERVERS_GROUP))
+
+        self.assertEqual(user.auth_groups.count(), 1)
+
+    def test_is_valid_auth_group(self):
+        self.assertFalse(UserProfile.is_valid_auth_group('foobar'))
+        self.assertTrue(UserProfile.is_valid_auth_group(OCL_SERVERS_GROUP))
+
+    def test_deactivate(self):
+        user = UserProfileFactory(is_active=True, deactivated_at=None, verified=True)
+
+        self.assertEqual(user.status, 'verified')
+
+        user.deactivate()
+
+        self.assertEqual(user.status, 'deactivated')
+        self.assertFalse(user.verified)
+        self.assertFalse(user.is_active)
+
+    def test_verify(self):
+        user = UserProfileFactory(
+            is_active=False, deactivated_at=datetime.now(), verified=False, verification_token=None)
+
+        self.assertEqual(user.status, 'deactivated')
+
+        user.send_verification_email = Mock()
+
+        user.verify()
+
+        self.assertEqual(user.status, 'verification_pending')
+        self.assertFalse(user.verified)
+        self.assertTrue(user.is_active)
+        self.assertIsNotNone(user.verification_token)
+        user.send_verification_email.assert_called_once()
+
 
 class TokenAuthenticationViewTest(OCLAPITestCase):
     def test_login(self):
         response = self.client.post('/users/login/', {})
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.data,
-            dict(username=['This field is required.'], password=['This field is required.'])
-        )
 
         response = self.client.post('/users/login/', dict(username='foo', password='bar'))
 

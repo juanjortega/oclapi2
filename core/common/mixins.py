@@ -20,7 +20,8 @@ from core.common.constants import HEAD, ACCESS_TYPE_EDIT, ACCESS_TYPE_VIEW, ACCE
     MUST_SPECIFY_EXTRA_PARAM_IN_BODY
 from core.common.permissions import HasPrivateAccess, HasOwnership, CanViewConceptDictionary
 from core.common.services import S3
-from .utils import write_csv_to_s3, get_csv_from_s3, get_query_params_from_url_string, compact_dict_by_values
+from .utils import write_csv_to_s3, get_csv_from_s3, get_query_params_from_url_string, compact_dict_by_values, \
+    to_owner_uri
 
 logger = logging.getLogger('oclapi')
 
@@ -31,7 +32,7 @@ class CustomPaginator:
         self.request = request
         self.queryset = queryset
         self.page_size = page_size
-        self.page_number = int(request.GET.get('page', '1'))
+        self.page_number = int(request.GET.get('page', '1') or '1')
         self.paginator = Paginator(self.queryset, self.page_size)
         self.page_object = self.paginator.get_page(self.page_number)
         self.page_count = ceil(int(self.total_count) / int(self.page_size))
@@ -91,7 +92,7 @@ class ListWithHeadersMixin(ListModelMixin):
     document_model = None
 
     def head(self, request, **kwargs):  # pylint: disable=unused-argument
-        queryset = self.filter_queryset(self.get_queryset())
+        queryset = self.filter_queryset()
         res = Response()
         res['num_found'] = get(self, 'total_count') or queryset.count()
         return res
@@ -115,7 +116,7 @@ class ListWithHeadersMixin(ListModelMixin):
             return Response(dict(facets=dict(fields=self.get_facets())))
 
         if self.object_list is None:
-            self.object_list = self.filter_queryset(self.get_queryset())
+            self.object_list = self.filter_queryset()
 
         if is_csv and search_string:
             klass = type(self.object_list[0])
@@ -428,7 +429,7 @@ class SourceChildMixin:
 
     @property
     def owner_url(self):
-        return get(self.owner, 'url')
+        return to_owner_uri(self.uri)
 
     @property
     def parent_resource(self):
@@ -460,18 +461,31 @@ class SourceChildMixin:
     @classmethod
     def from_uri_queryset(cls, uri):
         queryset = cls.objects.none()
+        from core.collections.utils import is_concept
+        is_concept_uri = is_concept(uri)
 
         try:
-            kwargs = get(resolve(uri), 'kwargs', {})
+            kwargs = get(resolve(uri.split('?')[0]), 'kwargs', {})
             query_params = get_query_params_from_url_string(uri)  # parsing query parameters
             kwargs.update(query_params)
             if 'concept' in kwargs:
                 kwargs['concept'] = parse.unquote(kwargs['concept'])
-            queryset = cls.get_base_queryset(kwargs)
-            if queryset.count() > 1 and \
-                    ('concept_version' not in kwargs or 'mapping_version' not in kwargs) and \
-                    ('concept' in kwargs or 'mapping' in kwargs):
-                queryset = queryset.filter(is_latest_version=True)
+            if 'collection' in kwargs and 'version' in kwargs:
+                from core.collections.models import Collection
+                collection_version = Collection.get_base_queryset(kwargs).first()
+                if collection_version:
+                    if 'expansion' in kwargs:
+                        expansion = collection_version.expansions.filter(mnemonic=kwargs['expansion']).first()
+                    else:
+                        expansion = collection_version.expansion
+                    if expansion:
+                        queryset = expansion.concepts if is_concept_uri else expansion.mappings
+            else:
+                queryset = cls.get_base_queryset(kwargs)
+                if queryset.count() > 1 and \
+                        ('concept_version' not in kwargs or 'mapping_version' not in kwargs) and \
+                        ('version' not in kwargs):
+                    queryset = queryset.filter(is_latest_version=True)
         except:  # pylint: disable=bare-except
             pass
 

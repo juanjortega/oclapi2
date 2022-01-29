@@ -23,6 +23,7 @@ class ConceptDocument(Document):
     owner_type = fields.KeywordField(attr='owner_type')
     source_version = fields.ListField(fields.KeywordField())
     collection_version = fields.ListField(fields.KeywordField())
+    expansion = fields.ListField(fields.KeywordField())
     collection = fields.ListField(fields.KeywordField())
     collection_url = fields.ListField(fields.KeywordField())
     collection_owner_url = fields.ListField(fields.KeywordField())
@@ -79,11 +80,21 @@ class ConceptDocument(Document):
 
     @staticmethod
     def prepare_collection_version(instance):
-        return list(instance.collection_set.values_list('version', flat=True))
+        collection_versions = list(instance.collection_set.values_list('version', flat=True))
+        expansion_collection_versions = list(
+            instance.expansion_set.values_list('collection_version__version', flat=True))
+
+        return list(set(collection_versions + expansion_collection_versions))
+
+    @staticmethod
+    def prepare_expansion(instance):
+        return list(instance.expansion_set.values_list('mnemonic', flat=True))
 
     @staticmethod
     def prepare_collection(instance):
-        return list(set(list(instance.collection_set.values_list('mnemonic', flat=True))))
+        collections = list(instance.collection_set.values_list('mnemonic', flat=True))
+        expansion_collections = list(instance.expansion_set.values_list('collection_version__mnemonic', flat=True))
+        return list(set(collections + expansion_collections))
 
     @staticmethod
     def prepare_collection_url(instance):
@@ -91,7 +102,9 @@ class ConceptDocument(Document):
 
     @staticmethod
     def prepare_collection_owner_url(instance):
-        return list({coll.parent_url for coll in instance.collection_set.select_related('user', 'organization')})
+        collection_owner_urls = [coll.parent_url for coll in instance.collection_set.all()]
+        expansion_collection_owner_urls = [expansion.owner_url for expansion in instance.expansion_set.all()]
+        return list(set(collection_owner_urls + expansion_collection_owner_urls))
 
     @staticmethod
     def prepare_extras(instance):

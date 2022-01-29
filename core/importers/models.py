@@ -13,7 +13,7 @@ from pydash import compact, get
 from core.collections.models import Collection
 from core.common.constants import HEAD
 from core.common.services import RedisService
-from core.common.tasks import bulk_import_parts_inline, delete_organization
+from core.common.tasks import bulk_import_parts_inline, delete_organization, batch_index_resources
 from core.common.utils import drop_version, is_url_encoded_string, encode_string, to_parent_uri
 from core.concepts.models import Concept
 from core.mappings.models import Mapping
@@ -183,6 +183,7 @@ class OrganizationImporter(BaseResourceImporter):
 
     def process(self):
         org = Organization.objects.create(**self.data)
+        org.members.add(org.created_by)
         if org:
             return CREATED
         return FAILED
@@ -409,6 +410,8 @@ class ConceptImporter(BaseResourceImporter):
 
     def process(self):
         parent = self.data.get('parent')
+        if not parent:
+            return FAILED
         if parent.has_edit_access(self.user):
             if self.version:
                 instance = self.get_queryset().first().clone()
@@ -432,7 +435,7 @@ class MappingImporter(BaseResourceImporter):
     mandatory_fields = {"map_type", "from_concept_url"}
     allowed_fields = [
         "id", "map_type", "from_concept_url", "to_source_url", "to_concept_url", "to_concept_code",
-        "to_concept_name", "extras", "external_id"
+        "to_concept_name", "extras", "external_id", "retired"
     ]
 
     def __init__(self, data, user, update_if_exists):
@@ -458,13 +461,14 @@ class MappingImporter(BaseResourceImporter):
             'map_type': self.get('map_type'),
         }
         if from_concept_code:
-            filters['from_concept_code'] = from_concept_code
+            filters['from_concept_code'] = from_concept_code if is_url_encoded_string(
+                from_concept_code) else encode_string(from_concept_code, safe='')
 
         versionless_from_concept_url = drop_version(from_concept_url)
         from_concept = Concept.objects.filter(id=F('versioned_object_id'), uri=versionless_from_concept_url).first()
         if from_concept:
             filters['from_concept__versioned_object_id'] = from_concept.versioned_object_id
-        else:
+        elif not from_concept_code:
             filters['from_concept_code'] = compact(versionless_from_concept_url.split('/'))[-1]
         if to_concept_url:
             versionless_to_concept_url = drop_version(to_concept_url)
@@ -483,7 +487,8 @@ class MappingImporter(BaseResourceImporter):
             filters['to_source__uri'] = drop_version(to_source_url)
 
         if to_concept_code:
-            filters['to_concept_code'] = to_concept_code
+            filters['to_concept_code'] = to_concept_code if is_url_encoded_string(
+                to_concept_code) else encode_string(to_concept_code, safe='')
 
         self.queryset = Mapping.objects.filter(**filters)
 
@@ -502,9 +507,9 @@ class MappingImporter(BaseResourceImporter):
         from_concept_code = self.data.get('from_concept_code')
         to_concept_code = self.data.get('to_concept_code')
         if from_concept_code and not is_url_encoded_string(from_concept_code):
-            self.data['from_concept_code'] = encode_string(from_concept_code)
+            self.data['from_concept_code'] = encode_string(from_concept_code, safe='')
         if to_concept_code and not is_url_encoded_string(to_concept_code):
-            self.data['to_concept_code'] = encode_string(to_concept_code)
+            self.data['to_concept_code'] = encode_string(to_concept_code, safe='')
 
     def clean(self):
         if not self.is_valid():
@@ -517,6 +522,8 @@ class MappingImporter(BaseResourceImporter):
 
     def process(self):
         parent = self.data.get('parent')
+        if not parent:
+            return FAILED
         if parent.has_edit_access(self.user):
             if self.version:
                 instance = self.get_queryset().first().clone()
@@ -559,13 +566,18 @@ class ReferenceImporter(BaseResourceImporter):
                 (added_references, _) = collection.add_expressions(
                     self.get('data'), self.user, self.get('__cascade', False)
                 )
-                for ref in added_references:
-                    if ref.concepts:
-                        for concept in ref.concepts:
-                            concept.index()
-                    if ref.mappings:
-                        for mapping in ref.mappings:
-                            mapping.index()
+                if not get(settings, 'TEST_MODE', False):
+                    for ref in added_references:
+                        if ref.concepts:
+                            batch_index_resources.apply_async(
+                                ('concept', dict(id__in=list(ref.concepts.values_list('id', flat=True)))),
+                                queue='indexing'
+                            )
+                        if ref.mappings:
+                            batch_index_resources.apply_async(
+                                ('mapping', dict(id__in=list(ref.mappings.values_list('id', flat=True)))),
+                                queue='indexing'
+                            )
 
                 return CREATED
             return PERMISSION_DENIED
@@ -758,7 +770,9 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
     def make_resource_distribution(self):
         for line in self.input_list:
             data = line if isinstance(line, dict) else json.loads(line)
-            data_type = data['type']
+            data_type = data.get('type', None)
+            if not data_type:
+                continue
             if data_type not in self.resource_distribution:
                 self.resource_distribution[data_type] = []
             self.resource_distribution[data_type].append(data)

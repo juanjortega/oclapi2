@@ -1,12 +1,14 @@
 from rest_framework.exceptions import ErrorDetail
 
-from core.collections.tests.factories import OrganizationCollectionFactory
+from core.collections.tests.factories import OrganizationCollectionFactory, ExpansionFactory
 from core.common.tests import OCLAPITestCase
 from core.concepts.tests.factories import ConceptFactory, LocalizedTextFactory
 from core.mappings.constants import SAME_AS
+from core.mappings.models import Mapping
 from core.mappings.tests.factories import MappingFactory
 from core.orgs.tests.factories import OrganizationFactory
 from core.sources.tests.factories import UserSourceFactory, OrganizationSourceFactory
+from core.users.models import UserProfile
 from core.users.tests.factories import UserProfileFactory
 
 
@@ -34,6 +36,9 @@ class MappingListViewTest(OCLAPITestCase):
         self.assertEqual(len(response.data), 1)
 
         collection = OrganizationCollectionFactory()
+        expansion = ExpansionFactory(collection_version=collection)
+        collection.expansion_uri = expansion.uri
+        collection.save()
 
         response = self.client.get(collection.mappings_url, format='json')
 
@@ -651,6 +656,38 @@ class MappingVersionRetrieveViewTest(OCLAPITestCase):
         response = self.client.get(self.mapping.url + 'unknown/')
 
         self.assertEqual(response.status_code, 404)
+
+    def test_soft_delete_204(self):
+        admin_token = UserProfile.objects.get(username='ocladmin').get_token()
+        mapping_v1 = MappingFactory(
+            parent=self.source, version='v1', mnemonic=self.mapping.mnemonic, to_concept=self.mapping.to_concept,
+            from_concept=self.mapping.from_concept, map_type=self.mapping.map_type
+        )
+
+        response = self.client.delete(
+            self.mapping.url + f'{mapping_v1.version}/',
+            HTTP_AUTHORIZATION=f'Token {admin_token}',
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertTrue(Mapping.objects.filter(id=mapping_v1.id).exists())
+        mapping_v1.refresh_from_db()
+        self.assertFalse(mapping_v1.is_active)
+
+    def test_hard_delete_204(self):
+        admin_token = UserProfile.objects.get(username='ocladmin').get_token()
+        mapping_v1 = MappingFactory(
+            parent=self.source, version='v1', mnemonic=self.mapping.mnemonic, to_concept=self.mapping.to_concept,
+            from_concept=self.mapping.from_concept, map_type=self.mapping.map_type
+        )
+
+        response = self.client.delete(
+            f'{self.mapping.url}{mapping_v1.version}/?hardDelete=true',
+            HTTP_AUTHORIZATION=f'Token {admin_token}',
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Mapping.objects.filter(id=mapping_v1.id).exists())
 
 
 class MappingExtrasViewTest(OCLAPITestCase):

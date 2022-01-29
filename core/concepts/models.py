@@ -185,6 +185,10 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
     WAS_RETIRED = CONCEPT_WAS_RETIRED
     WAS_UNRETIRED = CONCEPT_WAS_UNRETIRED
 
+    # $cascade as hierarchy attributes
+    cascaded_entries = None
+    terminal = None
+
     es_fields = {
         'id': {'sortable': True, 'filterable': True, 'exact': True},
         'numeric_id': {'sortable': True, 'filterable': False, 'exact': False},
@@ -241,7 +245,7 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
 
     @property
     def concept(self):  # for url kwargs
-        return self.mnemonic  # pragma: no cover
+        return self.mnemonic
 
     @staticmethod
     def get_resource_url_kwarg():
@@ -729,7 +733,8 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
 
                     transaction.on_commit(index_all)
         except ValidationError as err:
-            errors.update(err.message_dict)
+            if get(err, 'error_dict'):
+                errors.update(err.message_dict)
         finally:
             cls.resume_indexing()
             if not persisted:
@@ -864,6 +869,14 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
             return Concept.objects.filter(uri__in=urls)
         return Concept.objects.none()
 
+    @property
+    def children_concepts_count(self):
+        return len(self.child_concept_urls)
+
+    @property
+    def parent_concepts_count(self):
+        return len(self.parent_concept_urls)
+
     def parent_concept_queryset(self):
         urls = self.parent_concept_urls
         if urls:
@@ -885,30 +898,37 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
         return result
 
     def delete(self, using=None, keep_parents=False):
-        LocalizedText.objects.filter(name_locales=self).delete()
-        LocalizedText.objects.filter(description_locales=self).delete()
+        if self.is_versioned_object:
+            LocalizedText.objects.filter(name_locales=self).delete()
+            LocalizedText.objects.filter(description_locales=self).delete()
         return super().delete(using=using, keep_parents=keep_parents)
 
     def cascade(  # pylint: disable=too-many-arguments
             self, source_mappings=True, source_to_concepts=True, mappings_criteria=None,
             cascade_mappings=True, cascade_hierarchy=True, cascade_levels='*',
-            include_mappings=True, max_results=1000
+            include_mappings=True, reverse=False, max_results=1000
     ):
+        if cascade_levels == 0:
+            from core.mappings.models import Mapping
+            return dict(concepts=Concept.objects.filter(id=self.id), mappings=Mapping.objects.none())
         result = self.get_cascaded_resources(
-            source_mappings, source_to_concepts, mappings_criteria,
-            cascade_mappings, cascade_hierarchy, include_mappings
+            source_mappings=source_mappings, source_to_concepts=source_to_concepts, mappings_criteria=mappings_criteria,
+            cascade_mappings=cascade_mappings, cascade_hierarchy=cascade_hierarchy, include_mappings=include_mappings,
+            reverse=reverse
         )
         cascaded = [self.id]
 
         def iterate(level):
-            if level == '*' or level > 0:
+            if level == '*' or level > 1:
                 if (result['concepts'].count() + result['mappings'].count()) < max_results:
                     not_cascaded = result['concepts'].exclude(id__in=cascaded)
                     if not_cascaded.exists():
                         for concept in not_cascaded:
                             res = concept.get_cascaded_resources(
-                                source_mappings, source_to_concepts, mappings_criteria,
-                                cascade_mappings, cascade_hierarchy, include_mappings
+                                source_mappings=source_mappings, source_to_concepts=source_to_concepts,
+                                mappings_criteria=mappings_criteria, cascade_mappings=cascade_mappings,
+                                cascade_hierarchy=cascade_hierarchy, include_mappings=include_mappings,
+                                reverse=reverse
                             )
                             cascaded.append(concept.id)
                             result['concepts'] |= res['concepts']
@@ -919,24 +939,112 @@ class Concept(ConceptValidationMixin, SourceChildMixin, VersionedModel):  # pyli
 
         return result
 
-    def get_cascaded_resources(  # pylint: disable=too-many-arguments
+    def cascade_as_hierarchy(  # pylint: disable=too-many-arguments
             self, source_mappings=True, source_to_concepts=True, mappings_criteria=None,
-            cascade_mappings=True, cascade_hierarchy=True, include_mappings=True
+            cascade_mappings=True, cascade_hierarchy=True, cascade_levels='*',
+            include_mappings=True, reverse=False, _=None
+    ):
+        if cascade_levels == 0:
+            return self
+        self.cascaded_entries = self.get_cascaded_resources(
+            source_mappings=source_mappings, source_to_concepts=source_to_concepts, mappings_criteria=mappings_criteria,
+            cascade_mappings=cascade_mappings, cascade_hierarchy=cascade_hierarchy, include_mappings=include_mappings,
+            include_self=False, reverse=reverse
+        )
+        last_level_concepts = list(
+            set(list(self.cascaded_entries['hierarchy_concepts']) + list(self.cascaded_entries['concepts'])))
+        self.cascaded_entries['concepts'] = last_level_concepts
+        self.current_level = 1
+        levels = {self.current_level: last_level_concepts}
+
+        def has_entries(entries):
+            return entries is not None and (bool(len(entries['concepts'])) or entries['mappings'].exists())
+
+        concept_has_entries = has_entries(self.cascaded_entries)
+        self.terminal = not concept_has_entries
+        cascaded = {self.id: concept_has_entries}
+
+        def iterate(level):
+            if level == '*' or level > 1:
+                new_level = self.current_level + 1
+                levels[new_level] = levels.get(new_level, [])
+                for concept in levels[self.current_level]:
+                    if concept.id in cascaded:
+                        concept.terminal = not cascaded[concept.id]
+                        continue
+                    cascaded_entries = concept.get_cascaded_resources(
+                        source_mappings=source_mappings, source_to_concepts=source_to_concepts,
+                        mappings_criteria=mappings_criteria, cascade_mappings=cascade_mappings,
+                        cascade_hierarchy=cascade_hierarchy, include_mappings=include_mappings,
+                        include_self=False, reverse=reverse
+                    )
+                    cascaded_entries['concepts'] = list(
+                        set(list(cascaded_entries['hierarchy_concepts']) + list(cascaded_entries['concepts'])))
+
+                    concept.cascaded_entries = cascaded_entries
+                    concept_has_entries = has_entries(cascaded_entries)
+                    cascaded[concept.id] = concept_has_entries
+                    concept.terminal = not concept_has_entries
+                    levels[new_level] += cascaded_entries['concepts']
+                if not levels[new_level]:
+                    return
+                self.current_level += 1
+                iterate(level if level == '*' else level - 1)
+
+        iterate(cascade_levels)
+
+        return self
+
+    def get_cascaded_resources(self, **kwargs):
+        if kwargs.pop('reverse', None):
+            return self.cascaded_resources_reverse(**kwargs)
+        return self.cascaded_resources_forward(**kwargs)
+
+    def cascaded_resources_forward(  # pylint: disable=too-many-arguments
+            self, source_mappings=True, source_to_concepts=True, mappings_criteria=None,
+            cascade_mappings=True, cascade_hierarchy=True, include_mappings=True, include_self=True
     ):
         from core.mappings.models import Mapping
         mappings = Mapping.objects.none()
-        result = dict(concepts=Concept.objects.filter(id=self.id), mappings=mappings)
+        concepts = Concept.objects.filter(id=self.id) if include_self else Concept.objects.none()
+        result = dict(concepts=concepts, mappings=mappings, hierarchy_concepts=Concept.objects.none())
         mappings_criteria = mappings_criteria or Q()
         if cascade_mappings and (source_mappings or source_to_concepts):
-            mappings = self.get_unidirectional_mappings().filter(mappings_criteria)
+            mappings = self.get_unidirectional_mappings().filter(mappings_criteria).order_by('map_type')
             if include_mappings:
                 result['mappings'] = mappings
         if source_to_concepts:
+            if cascade_hierarchy:
+                result['hierarchy_concepts'] |= self.child_concept_queryset()
             if mappings.exists():
                 result['concepts'] |= Concept.objects.filter(
-                    id__in=mappings.values_list('to_concept_id', flat=True), parent_id=self.parent_id)
+                    id__in=mappings.values_list('to_concept_id', flat=True),
+                    parent_id=self.parent_id
+                )
+
+        return result
+
+    def cascaded_resources_reverse(  # pylint: disable=too-many-arguments
+            self, source_mappings=True, source_to_concepts=True, mappings_criteria=None,
+            cascade_mappings=True, cascade_hierarchy=True, include_mappings=True, include_self=True
+    ):
+        from core.mappings.models import Mapping
+        mappings = Mapping.objects.none()
+        concepts = Concept.objects.filter(id=self.id) if include_self else Concept.objects.none()
+        result = dict(concepts=concepts, mappings=mappings, hierarchy_concepts=Concept.objects.none())
+        mappings_criteria = mappings_criteria or Q()
+        if cascade_mappings and (source_mappings or source_to_concepts):
+            mappings = self.get_indirect_mappings().filter(mappings_criteria).order_by('map_type')
+            if include_mappings:
+                result['mappings'] = mappings
+        if source_to_concepts:
             if cascade_hierarchy:
-                result['concepts'] |= self.child_concept_queryset()
+                result['hierarchy_concepts'] |= self.parent_concept_queryset()
+            if mappings.exists():
+                result['concepts'] |= Concept.objects.filter(
+                    id__in=mappings.values_list('from_concept_id', flat=True),
+                    parent_id=self.parent_id
+                )
 
         return result
 

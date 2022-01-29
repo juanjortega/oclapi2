@@ -6,7 +6,7 @@ from django.db import transaction
 from mock import patch, Mock, ANY, PropertyMock
 from rest_framework.exceptions import ErrorDetail
 
-from core.collections.tests.factories import OrganizationCollectionFactory
+from core.collections.tests.factories import OrganizationCollectionFactory, ExpansionFactory
 from core.common.tasks import export_source
 from core.common.tests import OCLAPITestCase
 from core.common.utils import get_latest_dir_in_path
@@ -131,6 +131,8 @@ class SourceListViewTest(OCLAPITestCase):
         self.assertEqual(response.data['url'], source.uri)
         self.assertEqual(response.data['canonical_url'], source.canonical_url)
         self.assertEqual(source.canonical_url, 'https://foo.com/foo/bar/')
+        self.assertIsNone(source.active_mappings)
+        self.assertIsNone(source.active_concepts)
 
     def test_post_400(self):
         sources_url = f"/orgs/{self.organization.mnemonic}/sources/"
@@ -260,16 +262,33 @@ class SourceCreateUpdateDestroyViewTest(OCLAPITestCase):
         source.refresh_from_db()
         self.assertEqual(source.hierarchy_root_id, concept2.id)
 
-    def test_delete_204(self):
-        source = OrganizationSourceFactory(organization=self.organization)
+    @patch('core.sources.views.delete_source')
+    def test_delete_202(self, delete_source_task_mock):  # async delete
+        delete_source_task_mock.delay = Mock(return_value=Mock(id='task-id'))
+        source = OrganizationSourceFactory(mnemonic='source', organization=self.organization)
         response = self.client.delete(
             source.uri,
             HTTP_AUTHORIZATION='Token ' + self.token,
             format='json'
         )
 
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data, dict(task='task-id'))
+        delete_source_task_mock.delay.assert_called_once_with(source.id)
+
+    @patch('core.common.models.delete_s3_objects')
+    def test_delete_204(self, delete_s3_objects_mock):  # sync delete
+        source = OrganizationSourceFactory(mnemonic='source', organization=self.organization)
+        response = self.client.delete(
+            source.uri + '?inline=true',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
         self.assertEqual(response.status_code, 204)
         self.assertFalse(Source.objects.filter(id=source.id).exists())
+        self.assertFalse(Source.objects.filter(mnemonic='source').exists())
+        delete_s3_objects_mock.delay.assert_called_once_with(f'{self.organization.mnemonic}/source_HEAD.')
 
 
 class SourceVersionListViewTest(OCLAPITestCase):
@@ -373,8 +392,8 @@ class SourceLatestVersionRetrieveUpdateViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['id'], 'v1')
         self.assertEqual(response.data['uuid'], str(self.latest_version.id))
-        self.assertEqual(response.data['active_concepts'], 0)
-        self.assertEqual(response.data['active_mappings'], 0)
+        self.assertEqual(response.data['active_concepts'], None)
+        self.assertEqual(response.data['active_mappings'], None)
 
     def test_put_200(self):
         self.assertIsNone(self.latest_version.external_id)
@@ -474,8 +493,8 @@ class SourceVersionRetrieveUpdateDestroyViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data, {'id': [ErrorDetail(string='This field may not be null.', code='null')]})
 
-    @patch('core.common.services.S3.delete_objects', Mock())
-    def test_version_delete_204(self):
+    @patch('core.common.models.delete_s3_objects')
+    def test_version_delete_204(self, delete_s3_objects_mock):
         self.assertEqual(self.source.versions.count(), 2)
 
         response = self.client.delete(
@@ -487,15 +506,17 @@ class SourceVersionRetrieveUpdateDestroyViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 204)
         self.assertEqual(self.source.versions.count(), 1)
         self.assertFalse(self.source.versions.filter(version='v1').exists())
+        delete_s3_objects_mock.delay.assert_called_once_with(
+            f'{self.source.parent.mnemonic}/{self.source.mnemonic}_v1.')
 
-    @patch('core.common.services.S3.delete_objects', Mock())
-    def test_version_delete_204_referenced_in_private_collection(self):
+    @patch('core.common.models.delete_s3_objects')
+    def test_version_delete_204_referenced_in_private_collection(self, delete_s3_objects_mock):
         concept = ConceptFactory(parent=self.source_v1)
 
-        collection = OrganizationCollectionFactory(public_access='None')
+        collection = OrganizationCollectionFactory(public_access='None', autoexpand_head=False)
         collection.add_references([concept.uri])
-        self.assertEqual(collection.concepts.count(), 1)
-        self.assertEqual(collection.concepts.first(), concept.get_latest_version())
+        self.assertEqual(collection.concepts.count(), 0)  # no expansions
+        self.assertEqual(collection.references.count(), 1)
 
         response = self.client.delete(
             self.source_v1.uri,
@@ -506,6 +527,38 @@ class SourceVersionRetrieveUpdateDestroyViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 204)
         self.assertEqual(self.source.versions.count(), 1)
         self.assertFalse(self.source.versions.filter(version='v1').exists())
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(self.source.versions.count(), 1)
+        self.assertFalse(self.source.versions.filter(version='v1').exists())
+        delete_s3_objects_mock.delay.assert_called_once_with(
+            f'{self.source.parent.mnemonic}/{self.source.mnemonic}_v1.')
+
+        source_v2 = OrganizationSourceFactory(
+            mnemonic=self.source.mnemonic, organization=self.organization, version='v2',
+        )
+        self.assertEqual(self.source.versions.count(), 2)
+
+        concept2 = ConceptFactory(parent=self.source)
+        concept2_latest_version = concept2.get_latest_version()
+        concept2_latest_version.sources.add(source_v2)
+
+        expansion = ExpansionFactory(collection_version=collection)
+        collection.expansion_uri = expansion.uri
+        collection.autoexpand_head = True
+        collection.save()
+        collection.add_references([concept2.uri])
+        self.assertEqual(collection.expansion.concepts.count(), 1)
+        self.assertEqual(collection.references.count(), 2)
+
+        response = self.client.delete(
+            source_v2.uri,
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(self.source.versions.count(), 1)
+        self.assertFalse(self.source.versions.filter(version='v2').exists())
 
 
 class SourceExtraRetrieveUpdateDestroyViewTest(OCLAPITestCase):

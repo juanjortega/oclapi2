@@ -10,9 +10,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveIndex(
-            model_name='mapping',
-            name='mappings_is_acti_ccfa00_idx',
+        migrations.RunSQL(
+            "drop index if exists mappings_is_acti_ccfa00_idx"
         ),
         migrations.AddIndex(
             model_name='mapping',

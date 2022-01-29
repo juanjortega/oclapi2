@@ -4,10 +4,11 @@ from django.core.exceptions import ValidationError
 from core.common.constants import HEAD, CUSTOM_VALIDATION_SCHEMA_OPENMRS
 from core.common.tests import OCLTestCase
 from core.concepts.tests.factories import ConceptFactory, LocalizedTextFactory
+from core.mappings.documents import MappingDocument
 from core.mappings.models import Mapping
 from core.mappings.serializers import MappingMinimalSerializer, MappingVersionDetailSerializer, \
     MappingDetailSerializer, \
-    MappingVersionListSerializer, MappingListSerializer
+    MappingVersionListSerializer, MappingListSerializer, MappingReverseMinimalSerializer
 from core.mappings.tests.factories import MappingFactory
 from core.orgs.models import Organization
 from core.orgs.tests.factories import OrganizationFactory
@@ -19,6 +20,9 @@ from core.users.models import UserProfile
 class MappingTest(OCLTestCase):
     def test_mapping(self):
         self.assertEqual(Mapping(mnemonic='foobar').mapping, 'foobar')
+
+    def test_get_search_document(self):
+        self.assertEqual(Mapping.get_search_document(), MappingDocument)
 
     def test_source(self):
         self.assertIsNone(Mapping().source)
@@ -199,6 +203,7 @@ class MappingTest(OCLTestCase):
         self.assertEqual(Mapping.get_serializer_class(verbose=True), MappingDetailSerializer)
         self.assertEqual(Mapping.get_serializer_class(verbose=True, version=True), MappingVersionDetailSerializer)
         self.assertEqual(Mapping.get_serializer_class(brief=True), MappingMinimalSerializer)
+        self.assertEqual(Mapping.get_serializer_class(brief=True, reverse=True), MappingReverseMinimalSerializer)
 
 
 class OpenMRSMappingValidatorTest(OCLTestCase):

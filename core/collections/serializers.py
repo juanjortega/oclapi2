@@ -7,9 +7,9 @@ from rest_framework.serializers import ModelSerializer
 
 from core.client_configs.serializers import ClientConfigSerializer
 from core.collections.constants import INCLUDE_REFERENCES_PARAM
-from core.collections.models import Collection, CollectionReference
+from core.collections.models import Collection, CollectionReference, Expansion
 from core.common.constants import HEAD, DEFAULT_ACCESS_TYPE, NAMESPACE_REGEX, ACCESS_TYPE_CHOICES, INCLUDE_SUMMARY, \
-    INCLUDE_CLIENT_CONFIGS
+    INCLUDE_CLIENT_CONFIGS, INVALID_EXPANSION_URL
 from core.orgs.models import Organization
 from core.settings import DEFAULT_LOCALE
 from core.users.models import UserProfile
@@ -26,7 +26,7 @@ class CollectionListSerializer(ModelSerializer):
         model = Collection
         fields = (
             'short_code', 'name', 'url', 'owner', 'owner_type', 'owner_url', 'version', 'created_at', 'id',
-            'collection_type', 'updated_at', 'canonical_url',
+            'collection_type', 'updated_at', 'canonical_url', 'autoexpand_head'
         )
 
 
@@ -39,13 +39,15 @@ class CollectionVersionListSerializer(ModelSerializer):
     version_url = CharField(source='uri')
     url = CharField(source='versioned_object_url')
     previous_version_url = CharField(source='prev_version_uri')
+    autoexpand = BooleanField(source='should_auto_expand')
+    expansion_url = CharField(source='expansion_uri', read_only=True)
 
     class Meta:
         model = Collection
         fields = (
             'short_code', 'name', 'url', 'owner', 'owner_type', 'owner_url', 'version', 'created_at', 'id',
             'collection_type', 'updated_at', 'canonical_url', 'released', 'retired', 'version_url',
-            'previous_version_url',
+            'previous_version_url', 'autoexpand', 'expansion_url',
         )
 
 
@@ -81,12 +83,20 @@ class CollectionCreateOrUpdateSerializer(ModelSerializer):
             setattr(collection, attr, validated_data.get(attr, get(collection, attr)))
 
         collection.full_name = validated_data.get('full_name', collection.full_name) or collection.name
+        collection.autoexpand_head = validated_data.get('autoexpand_head', collection.autoexpand_head)
+        collection.autoexpand = validated_data.get('autoexpand', collection.autoexpand)
+        collection.expansion_uri = validated_data.get('expansion_uri', collection.expansion_uri)
+        if collection.id and collection.expansion_uri and not collection.expansions.filter(
+                uri=collection.expansion_uri).exists():
+            self._errors.update({'expansion_url': INVALID_EXPANSION_URL})
 
         return collection
 
     def update(self, instance, validated_data):
         original_schema = instance.custom_validation_schema
         collection = self.prepare_object(validated_data, instance)
+        if self._errors:
+            return collection
         user = self.context['request'].user
         errors = Collection.persist_changes(collection, user, original_schema)
         self._errors.update(errors)
@@ -138,6 +148,8 @@ class CollectionCreateSerializer(CollectionCreateOrUpdateSerializer):
     copyright = CharField(required=False, allow_null=True, allow_blank=True)
     experimental = BooleanField(required=False, allow_null=True, default=None)
     locked_date = DateTimeField(required=False, allow_null=True)
+    autoexpand_head = BooleanField(required=False, default=True)
+    autoexpand = BooleanField(required=False, default=True)
 
     def create(self, validated_data):
         collection = self.prepare_object(validated_data)
@@ -154,12 +166,25 @@ class CollectionCreateSerializer(CollectionCreateOrUpdateSerializer):
         return collection
 
 
+class ExpansionSummarySerializer(ModelSerializer):
+    class Meta:
+        model = Expansion
+        fields = ('active_concepts', 'active_mappings')
+
+
+class ExpansionSummaryDetailSerializer(ExpansionSummarySerializer):
+    class Meta:
+        model = Expansion
+        fields = ExpansionSummarySerializer.Meta.fields + ('id', 'mnemonic')
+
+
 class CollectionSummarySerializer(ModelSerializer):
     versions = IntegerField(source='num_versions')
+    expansions = IntegerField(source='expansions_count')
 
     class Meta:
         model = Collection
-        fields = ('active_mappings', 'active_concepts', 'versions')
+        fields = ('active_mappings', 'active_concepts', 'versions', 'active_references', 'expansions')
 
 
 class CollectionSummaryDetailSerializer(CollectionSummarySerializer):
@@ -174,9 +199,11 @@ class CollectionSummaryDetailSerializer(CollectionSummarySerializer):
 
 
 class CollectionVersionSummarySerializer(ModelSerializer):
+    expansions = IntegerField(source='expansions_count')
+
     class Meta:
         model = Collection
-        fields = ('active_mappings', 'active_concepts')
+        fields = ('active_mappings', 'active_concepts', 'active_references', 'expansions')
 
 
 class CollectionVersionSummaryDetailSerializer(CollectionVersionSummarySerializer):
@@ -206,6 +233,7 @@ class CollectionDetailSerializer(CollectionCreateOrUpdateSerializer):
     references = SerializerMethodField()
     summary = SerializerMethodField()
     client_configs = SerializerMethodField()
+    expansion_url = CharField(source='expansion_uri', read_only=True, allow_null=True, allow_blank=True)
 
     class Meta:
         model = Collection
@@ -215,12 +243,11 @@ class CollectionDetailSerializer(CollectionCreateOrUpdateSerializer):
             'custom_validation_schema', 'public_access', 'default_locale', 'supported_locales', 'website',
             'url', 'owner', 'owner_type', 'owner_url',
             'created_on', 'updated_on', 'created_by', 'updated_by', 'extras', 'external_id', 'versions_url',
-            'version', 'concepts_url', 'mappings_url',
+            'version', 'concepts_url', 'mappings_url', 'expansions_url',
             'custom_resources_linked_source', 'repository_type', 'preferred_source', 'references',
             'canonical_url', 'identifier', 'publisher', 'contact', 'jurisdiction', 'purpose', 'copyright', 'meta',
             'immutable', 'revision_date', 'logo_url', 'summary', 'text', 'client_configs',
-            'experimental', 'locked_date'
-
+            'experimental', 'locked_date', 'autoexpand_head', 'expansion_url'
         )
 
     def __init__(self, *args, **kwargs):
@@ -282,6 +309,8 @@ class CollectionVersionDetailSerializer(CollectionCreateOrUpdateSerializer):
     created_by = CharField(read_only=True, source='created_by.username')
     updated_by = CharField(read_only=True, source='updated_by.username')
     summary = SerializerMethodField()
+    autoexpand = SerializerMethodField()
+    expansion_url = CharField(source='expansion_uri', allow_null=True, allow_blank=True)
 
     class Meta:
         model = Collection
@@ -291,9 +320,10 @@ class CollectionVersionDetailSerializer(CollectionCreateOrUpdateSerializer):
             'custom_validation_schema', 'public_access', 'default_locale', 'supported_locales', 'website',
             'url', 'owner', 'owner_type', 'owner_url', 'version_url', 'previous_version_url',
             'created_on', 'updated_on', 'created_by', 'updated_by', 'extras', 'external_id', 'version',
-            'version', 'concepts_url', 'mappings_url', 'is_processing', 'released', 'retired',
+            'version', 'concepts_url', 'mappings_url', 'expansions_url', 'is_processing', 'released', 'retired',
             'canonical_url', 'identifier', 'publisher', 'contact', 'jurisdiction', 'purpose', 'copyright', 'meta',
-            'immutable', 'revision_date', 'summary', 'text', 'experimental', 'locked_date'
+            'immutable', 'revision_date', 'summary', 'text', 'experimental', 'locked_date',
+            'autoexpand', 'expansion_url'
         )
 
     def __init__(self, *args, **kwargs):
@@ -318,6 +348,10 @@ class CollectionVersionDetailSerializer(CollectionCreateOrUpdateSerializer):
             summary = CollectionVersionSummarySerializer(obj).data
 
         return summary
+
+    @staticmethod
+    def get_autoexpand(obj):
+        return obj.should_auto_expand
 
 
 class CollectionReferenceSerializer(ModelSerializer):
@@ -344,3 +378,71 @@ class CollectionVersionExportSerializer(CollectionVersionDetailSerializer):
         fields = (
             *CollectionVersionDetailSerializer.Meta.fields, 'collection'
         )
+
+
+class ExpansionSerializer(ModelSerializer):
+    summary = SerializerMethodField()
+    url = CharField(source='uri', read_only=True)
+    parameters = JSONField()
+
+    class Meta:
+        model = Expansion
+        fields = ('mnemonic', 'id', 'parameters', 'canonical_url', 'url', 'summary')
+
+    def __init__(self, *args, **kwargs):
+        params = get(kwargs, 'context.request.query_params')
+        self.include_summary = False
+        if params:
+            self.query_params = params.dict()
+            self.include_summary = self.query_params.get(INCLUDE_SUMMARY) in ['true', True]
+
+        try:
+            if not self.include_summary:
+                self.fields.pop('summary', None)
+        except:  # pylint: disable=bare-except
+            pass
+
+        super().__init__(*args, **kwargs)
+
+    def get_summary(self, obj):
+        summary = None
+
+        if self.include_summary:
+            summary = ExpansionSummarySerializer(obj).data
+
+        return summary
+
+
+class ExpansionDetailSerializer(ModelSerializer):
+    summary = SerializerMethodField()
+    url = CharField(source='uri', read_only=True)
+    parameters = JSONField()
+    created_on = DateTimeField(source='created_at', read_only=True)
+    created_by = DateTimeField(source='created_by.username', read_only=True)
+
+    class Meta:
+        model = Expansion
+        fields = ('mnemonic', 'id', 'parameters', 'canonical_url', 'url', 'summary', 'created_on', 'created_by')
+
+    def __init__(self, *args, **kwargs):
+        params = get(kwargs, 'context.request.query_params')
+        self.include_summary = False
+        if params:
+            self.query_params = params.dict()
+            self.include_summary = self.query_params.get(INCLUDE_SUMMARY) in ['true', True]
+
+        try:
+            if not self.include_summary:
+                self.fields.pop('summary', None)
+        except:  # pylint: disable=bare-except
+            pass
+
+        super().__init__(*args, **kwargs)
+
+    def get_summary(self, obj):
+        summary = None
+
+        if self.include_summary:
+            summary = ExpansionSummarySerializer(obj).data
+
+        return summary

@@ -212,8 +212,12 @@ def write_export_file(
     is_collection = resource_type == 'collection'
 
     if is_collection:
-        concepts_qs = Concept.collection_set.through.objects.filter(collection_id=version.id)
-        mappings_qs = Mapping.collection_set.through.objects.filter(collection_id=version.id)
+        if version.expansion_uri:
+            concepts_qs = Concept.expansion_set.through.objects.filter(expansion_id=version.expansion.id)
+            mappings_qs = Mapping.expansion_set.through.objects.filter(expansion_id=version.expansion.id)
+        else:
+            concepts_qs = Concept.collection_set.through.objects.filter(collection_id=version.id)
+            mappings_qs = Mapping.collection_set.through.objects.filter(collection_id=version.id)
     else:
         concepts_qs = Concept.sources.through.objects.filter(source_id=version.id)
         mappings_qs = Mapping.sources.through.objects.filter(source_id=version.id)
@@ -508,6 +512,10 @@ def to_parent_uri(expression):
     return expression
 
 
+def to_owner_uri(expression):
+    return '/' + '/'.join(compact(expression.split('/'))[:2]) + '/'
+
+
 def separate_version(expression):
     versionless_expression = drop_version(expression)
     if expression != versionless_expression:
@@ -711,3 +719,11 @@ def named_tuple_fetchall(cursor):
     desc = cursor.description
     nt_result = namedtuple('Result', [col[0] for col in desc])
     return [nt_result(*row) for row in cursor.fetchall()]
+
+
+def nested_dict_values(_dict):
+    for value in _dict.values():
+        if isinstance(value, dict):
+            yield from nested_dict_values(value)
+        else:
+            yield value

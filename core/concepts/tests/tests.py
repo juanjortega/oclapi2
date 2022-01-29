@@ -1,6 +1,8 @@
 import factory
 from pydash import omit
 
+from core.collections.models import CollectionReference
+from core.collections.tests.factories import OrganizationCollectionFactory, ExpansionFactory
 from core.common.constants import CUSTOM_VALIDATION_SCHEMA_OPENMRS, HEAD, ACCESS_TYPE_EDIT, ACCESS_TYPE_VIEW
 from core.common.tests import OCLTestCase
 from core.concepts.constants import (
@@ -10,6 +12,7 @@ from core.concepts.constants import (
     SHORT, INDEX_TERM, OPENMRS_NAMES_EXCEPT_SHORT_MUST_BE_UNIQUE, OPENMRS_ONE_FULLY_SPECIFIED_NAME_PER_LOCALE,
     OPENMRS_NO_MORE_THAN_ONE_SHORT_NAME_PER_LOCALE, CONCEPT_IS_ALREADY_RETIRED, CONCEPT_IS_ALREADY_NOT_RETIRED,
     OPENMRS_CONCEPT_CLASS, OPENMRS_DATATYPE, OPENMRS_DESCRIPTION_TYPE, OPENMRS_NAME_LOCALE, OPENMRS_DESCRIPTION_LOCALE)
+from core.concepts.documents import ConceptDocument
 from core.concepts.models import Concept, LocalizedText
 from core.concepts.serializers import ConceptListSerializer, ConceptVersionListSerializer, ConceptDetailSerializer, \
     ConceptVersionDetailSerializer, ConceptMinimalSerializer
@@ -56,6 +59,13 @@ class LocalizedTextTest(OCLTestCase):
 
 
 class ConceptTest(OCLTestCase):
+    def test_concept(self):
+        self.assertEqual(Concept().concept, '')
+        self.assertEqual(Concept(mnemonic='foobar').concept, 'foobar')
+
+    def test_get_search_document(self):
+        self.assertEqual(Concept.get_search_document(), ConceptDocument)
+
     def test_is_versioned(self):
         self.assertTrue(Concept().is_versioned)
 
@@ -946,6 +956,7 @@ class ConceptTest(OCLTestCase):
         self.assertEqual(
             list(child_child_concept.child_concept_queryset().values_list('uri', flat=True)), [])
         self.assertEqual(child_child_concept.parent_concept_urls, [child_concept.uri])
+        self.assertEqual(parent_concept.children_concepts_count, 1)
 
     def test_parent_concept_queryset(self):
         parent_concept = ConceptFactory()
@@ -975,6 +986,7 @@ class ConceptTest(OCLTestCase):
         self.assertEqual(
             list(child_child_concept.parent_concept_queryset().values_list('uri', flat=True)), [child_concept.uri])
         self.assertEqual(child_child_concept.parent_concept_urls, [child_concept.uri])
+        self.assertEqual(child_child_concept.parent_concepts_count, 1)
 
     def test_get_serializer_class(self):
         self.assertEqual(Concept.get_serializer_class(), ConceptListSerializer)
@@ -982,6 +994,172 @@ class ConceptTest(OCLTestCase):
         self.assertEqual(Concept.get_serializer_class(verbose=True), ConceptDetailSerializer)
         self.assertEqual(Concept.get_serializer_class(verbose=True, version=True), ConceptVersionDetailSerializer)
         self.assertEqual(Concept.get_serializer_class(brief=True), ConceptMinimalSerializer)
+
+    def test_from_uri_queryset_for_source_and_source_version(self):
+        source = OrganizationSourceFactory()
+        concept = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory), 'mnemonic': 'c1', 'parent': source,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)],
+        })
+        self.assertEqual(concept.versions.count(), 1)
+
+        concepts = Concept.from_uri_queryset(source.uri + 'concepts/')
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept.get_latest_version().id)
+
+        source_version1 = OrganizationSourceFactory(
+            version='v1', mnemonic=source.mnemonic, organization=source.organization)
+        source_version1.seed_concepts(index=False)
+        self.assertEqual(source_version1.concepts.count(), 1)
+
+        concepts = Concept.from_uri_queryset(source_version1.uri + 'concepts/')
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept.get_latest_version().id)
+
+        source_version2 = OrganizationSourceFactory(
+            version='v2', mnemonic=source.mnemonic, organization=source.organization)
+
+        cloned_concept = Concept.version_for_concept(concept, 'v1', source_version2)
+        Concept.persist_clone(cloned_concept, concept.created_by)
+        self.assertEqual(concept.versions.count(), 2)
+
+        concept_v1 = concept.get_latest_version()
+        self.assertTrue(concept_v1.is_latest_version)
+        concepts = Concept.from_uri_queryset(concept_v1.version_url)
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept_v1.id)
+
+        concept_prev_version = concept_v1.prev_version
+        self.assertFalse(concept_prev_version.is_latest_version)
+        concepts = Concept.from_uri_queryset(concept_prev_version.version_url)
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept_prev_version.id)
+
+        concepts = Concept.from_uri_queryset(source.uri + 'concepts/')
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept_v1.id)
+
+        concepts = Concept.from_uri_queryset(source_version2.uri + 'concepts/')
+
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept_v1.id)
+
+        concepts = Concept.from_uri_queryset(source_version1.uri + 'concepts/')
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept_prev_version.id)
+
+    def test_from_uri_queryset_for_collection_and_collection_version(self):
+        source = OrganizationSourceFactory()
+        concept = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory), 'mnemonic': 'c1', 'parent': source,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)],
+        })
+        source_version1 = OrganizationSourceFactory(
+            version='v1', mnemonic=source.mnemonic, organization=source.organization)
+        source_version1.seed_concepts(index=False)
+        source_version2 = OrganizationSourceFactory(
+            version='v2', mnemonic=source.mnemonic, organization=source.organization)
+
+        cloned_concept = Concept.version_for_concept(concept, 'v1', source_version2)
+        Concept.persist_clone(cloned_concept, concept.created_by)
+        self.assertEqual(concept.versions.count(), 2)
+
+        concept_v1 = concept.get_latest_version()
+        collection = OrganizationCollectionFactory()
+        collection_version1 = OrganizationCollectionFactory(
+            version='v1', mnemonic=collection.mnemonic, organization=collection.organization)
+        expansion = ExpansionFactory(collection_version=collection_version1)
+        reference = CollectionReference(expression=concept_v1.version_url)
+        reference.save()
+        collection_version1.references.add(reference)
+        expansion.seed_children(index=False)
+
+        self.assertEqual(expansion.concepts.count(), 1)
+
+        concepts = Concept.from_uri_queryset(expansion.uri + 'concepts/')
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept_v1.id)
+
+        concepts = Concept.from_uri_queryset(collection_version1.uri + 'concepts/')
+        self.assertEqual(concepts.count(), 0)
+
+        collection_version1.expansion_uri = expansion.uri
+        collection_version1.save()
+
+        concepts = Concept.from_uri_queryset(collection_version1.uri + 'concepts/')
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept_v1.id)
+
+        concepts = Concept.from_uri_queryset(collection.uri + 'concepts/')
+        self.assertEqual(concepts.count(), 0)
+
+    def test_cascade_as_hierarchy(self):
+        source = OrganizationSourceFactory()
+        root = ConceptFactory(parent=source, mnemonic='root')
+        root_child = ConceptFactory(parent=source, mnemonic='root-child')
+        root_child.parent_concepts.add(root)
+        root_child_child1 = ConceptFactory(parent=source, mnemonic='root-child-child1')
+        root_child_child1.parent_concepts.add(root_child)
+        root_child_child2 = ConceptFactory(parent=source, mnemonic='root-child-child2')
+        root_child_child2.parent_concepts.add(root_child)
+        root_child_child2_child = ConceptFactory(parent=source, mnemonic='root-child-child2-child')
+        root_child_child2_child.parent_concepts.add(root_child_child2)
+
+        root_cascaded = root.cascade_as_hierarchy()
+
+        self.assertTrue(isinstance(root_cascaded, Concept))
+        self.assertEqual(root_cascaded.uri, root.uri)
+
+        root_cascaded_children = root_cascaded.cascaded_entries
+        self.assertEqual(len(root_cascaded_children['concepts']), 1)
+        self.assertEqual(root_cascaded_children['mappings'].count(), 0)
+
+        root_child_cascaded = root_cascaded_children['concepts'][0]
+        root_child_cascaded_children = root_child_cascaded.cascaded_entries
+        self.assertEqual(len(root_child_cascaded_children['concepts']), 2)
+        self.assertEqual(root_child_cascaded_children['mappings'].count(), 0)
+
+        root_child_child1_cascaded_children = [
+            child for child in root_child_cascaded_children['concepts'] if child.mnemonic == 'root-child-child1'
+        ][0].cascaded_entries
+        root_child_child2_cascaded_children = [
+            child for child in root_child_cascaded_children['concepts'] if child.mnemonic == 'root-child-child2'
+        ][0].cascaded_entries
+
+        self.assertEqual(len(root_child_child1_cascaded_children['concepts']), 0)
+        self.assertEqual(len(root_child_child1_cascaded_children['mappings']), 0)
+
+        self.assertEqual(len(root_child_child2_cascaded_children['concepts']), 1)
+        self.assertEqual(len(root_child_child2_cascaded_children['mappings']), 0)
+
+    def test_cascade_as_hierarchy_reverse(self):
+        source = OrganizationSourceFactory()
+        root = ConceptFactory(parent=source, mnemonic='root')
+        root_child = ConceptFactory(parent=source, mnemonic='root-child')
+        root_child.parent_concepts.add(root)
+        root_child_child1 = ConceptFactory(parent=source, mnemonic='root-child-child1')
+        root_child_child1.parent_concepts.add(root_child)
+        root_child_child2 = ConceptFactory(parent=source, mnemonic='root-child-child2')
+        root_child_child2.parent_concepts.add(root_child)
+        root_child_child2_child = ConceptFactory(parent=source, mnemonic='root-child-child2-child')
+        root_child_child2_child.parent_concepts.add(root_child_child2)
+
+        root_child_child2_child_cascaded = root_child_child2_child.cascade_as_hierarchy(reverse=True)
+
+        self.assertEqual(root_child_child2_child_cascaded.uri, root_child_child2_child.uri)
+        root_child_child2_child_cascaded_entries = root_child_child2_child_cascaded.cascaded_entries
+        self.assertEqual(len(root_child_child2_child_cascaded_entries['concepts']), 1)
+        self.assertEqual(len(root_child_child2_child_cascaded_entries['mappings']), 0)
+        self.assertEqual(root_child_child2_child_cascaded_entries['concepts'][0].url, root_child_child2.url)
+        self.assertEqual(
+            root_child_child2_child_cascaded_entries['concepts'][0].cascaded_entries['concepts'][0].url,
+            root_child.url
+        )
+        self.assertEqual(
+            root_child_child2_child_cascaded_entries['concepts'][0].cascaded_entries['concepts'][
+                0].cascaded_entries['concepts'][0].url,
+            root.url
+        )
 
 
 class OpenMRSConceptValidatorTest(OCLTestCase):

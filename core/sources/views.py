@@ -9,9 +9,9 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404
 from drf_yasg.utils import swagger_auto_schema
 from pydash import get
-from rest_framework import status, mixins
+from rest_framework import status
 from rest_framework.generics import (
-    RetrieveAPIView, ListAPIView, UpdateAPIView)
+    RetrieveAPIView, ListAPIView, UpdateAPIView, CreateAPIView)
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
@@ -24,7 +24,7 @@ from core.common.permissions import CanViewConceptDictionary, CanEditConceptDict
 from core.common.serializers import TaskSerializer
 from core.common.swagger_parameters import q_param, limit_param, sort_desc_param, sort_asc_param, exact_match_param, \
     page_param, verbose_param, include_retired_param, updated_since_param, include_facets_header, compress_header
-from core.common.tasks import export_source, delete_source, index_source_concepts, index_source_mappings
+from core.common.tasks import export_source, index_source_concepts, index_source_mappings, delete_source
 from core.common.utils import parse_boolean_query_param, compact_dict_by_values
 from core.common.views import BaseAPIView, BaseLogoView
 from core.sources.constants import DELETE_FAILURE, DELETE_SUCCESS, VERSION_ALREADY_EXISTS
@@ -178,12 +178,15 @@ class SourceRetrieveUpdateDestroyView(SourceBaseView, ConceptDictionaryUpdateMix
 
         self.check_object_permissions(self.request, instance)
         if not get(settings, 'TEST_MODE', False):
-            if instance.active_concepts == 0:
+            if instance.should_set_active_concepts:
                 instance.update_concepts_count()
-            if instance.active_mappings == 0:
+            if instance.should_set_active_mappings:
                 instance.update_mappings_count()
             for version in instance.versions.exclude(id=instance.id):
-                version.update_children_counts()
+                if version.should_set_active_mappings:
+                    version.update_concepts_count()
+                if version.should_set_active_mappings:
+                    version.update_mappings_count()
         return instance
 
     def get_permissions(self):
@@ -192,13 +195,10 @@ class SourceRetrieveUpdateDestroyView(SourceBaseView, ConceptDictionaryUpdateMix
 
         return [CanEditConceptDictionary()]
 
-    def is_async_requested(self):
-        return self.request.query_params.get('async', None) in ['true', True, 'True']
-
     def delete(self, request, *args, **kwargs):  # pylint: disable=unused-argument
         source = self.get_object()
 
-        if self.is_async_requested():
+        if not self.is_inline_requested():
             task = delete_source.delay(source.id)
             return Response(dict(task=task.id), status=status.HTTP_202_ACCEPTED)
 
@@ -210,7 +210,7 @@ class SourceRetrieveUpdateDestroyView(SourceBaseView, ConceptDictionaryUpdateMix
         return Response({'detail': get(result, 'messages', [DELETE_FAILURE])}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class SourceVersionListView(SourceVersionBaseView, mixins.CreateModelMixin, ListWithHeadersMixin):
+class SourceVersionListView(SourceVersionBaseView, CreateAPIView, ListWithHeadersMixin):
     released_filter = None
     processing_filter = None
     default_qs_sort_attr = '-created_at'
@@ -227,9 +227,6 @@ class SourceVersionListView(SourceVersionBaseView, mixins.CreateModelMixin, List
         self.released_filter = parse_boolean_query_param(request, RELEASED_PARAM, self.released_filter)
         self.processing_filter = parse_boolean_query_param(request, PROCESSING_PARAM, self.processing_filter)
         return self.list(request, *args, **kwargs)
-
-    def post(self, request, *args, **kwargs):
-        return self.create(request, *args, **kwargs)
 
     def create(self, request, *args, **kwargs):
         head_object = self.get_queryset().first()
@@ -347,9 +344,9 @@ class SourceVersionRetrieveUpdateDestroyView(SourceVersionBaseView, RetrieveAPIV
         instance = get_object_or_404(self.get_queryset())
         self.check_object_permissions(self.request, instance)
         if not get(settings, 'TEST_MODE', False):
-            if instance.active_concepts == 0:
+            if instance.should_set_active_concepts:
                 instance.update_concepts_count()
-            if instance.active_mappings == 0:
+            if instance.should_set_active_mappings:
                 instance.update_mappings_count()
         return instance
 

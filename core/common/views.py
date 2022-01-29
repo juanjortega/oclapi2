@@ -22,7 +22,7 @@ from rest_framework.views import APIView
 from core import __version__
 from core.common.constants import SEARCH_PARAM, LIST_DEFAULT_LIMIT, CSV_DEFAULT_LIMIT, \
     LIMIT_PARAM, NOT_FOUND, MUST_SPECIFY_EXTRA_PARAM_IN_BODY, INCLUDE_RETIRED_PARAM, VERBOSE_PARAM, HEAD, LATEST, \
-    BRIEF_PARAM, ES_REQUEST_TIMEOUT
+    BRIEF_PARAM, ES_REQUEST_TIMEOUT, INCLUDE_INACTIVE
 from core.common.exceptions import Http400
 from core.common.mixins import PathWalkerMixin, ListWithHeadersMixin
 from core.common.serializers import RootSerializer
@@ -68,13 +68,16 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         return self.has_owner_scope() and self.has_concept_container_scope()
 
     def _should_exclude_retired_from_search_results(self):
-        if self.is_owner_document_model():
+        if self.is_owner_document_model() or 'expansion' in self.kwargs:
             return False
 
         params = get(self, 'params') or self.request.query_params.dict()
         include_retired = params.get('retired', None) in [True, 'true'] or params.get(
             INCLUDE_RETIRED_PARAM, None) in [True, 'true']
         return not include_retired
+
+    def should_include_inactive(self):
+        return self.request.query_params.get(INCLUDE_INACTIVE) in ['true', True]
 
     def _should_include_private(self):
         return self.is_user_document() or self.request.user.is_staff or self.is_user_scope()
@@ -84,6 +87,15 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
 
     def is_brief(self):
         return self.request.query_params.get(BRIEF_PARAM, False) in ['true', True]
+
+    def is_hard_delete_requested(self):
+        return self.request.query_params.get('hardDelete', None) in ['true', True, 'True']
+
+    def is_async_requested(self):
+        return self.request.query_params.get('async', None) in ['true', True, 'True']
+
+    def is_inline_requested(self):
+        return self.request.query_params.get('inline', None) in ['true', True, 'True']
 
     def verify_scope(self):
         pass
@@ -125,9 +137,12 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
     def get_host_url(self):
         return self.request.META['wsgi.url_scheme'] + '://' + self.request.get_host()
 
-    def filter_queryset(self, queryset):
+    def filter_queryset(self, queryset=None):
         if self.is_searchable and self.should_perform_es_search():
             return self.get_search_results_qs()
+
+        if queryset is None:
+            queryset = self.get_queryset()
 
         return super().filter_queryset(queryset).order_by(self.default_qs_sort_attr)
 
@@ -287,7 +302,7 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
 
         return filters
 
-    def get_kwargs_filters(self):
+    def get_kwargs_filters(self):  # pylint: disable=too-many-branches
         filters = self.get_facet_filters_from_kwargs()
         is_source_child_document_model = self.is_source_child_document_model()
         is_version_specified = 'version' in self.kwargs
@@ -300,21 +315,27 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
             filters['collection_version'] = self.kwargs['version']
 
         if is_source_child_document_model:
+            version = None
             if is_version_specified:
                 container_version = self.kwargs['version']
                 is_latest_released = container_version == LATEST
+                params = dict(user__username=self.kwargs.get('user'), organization__mnemonic=self.kwargs.get('org'))
                 if is_latest_released:
-                    params = dict(user__username=self.kwargs.get('user'), organization__mnemonic=self.kwargs.get('org'))
                     if is_source_specified:
                         from core.sources.models import Source
-                        latest_released_version = Source.find_latest_released_version_by(
+                        version = Source.find_latest_released_version_by(
                             {**params, 'mnemonic': self.kwargs['source']})
-                        filters['source_version'] = get(latest_released_version, 'version')
+                        filters['source_version'] = get(version, 'version')
                     elif is_collection_specified:
                         from core.collections.models import Collection
-                        latest_released_version = Collection.find_latest_released_version_by(
+                        version = Collection.find_latest_released_version_by(
                             {**params, 'mnemonic': self.kwargs['collection']})
-                        filters['collection_version'] = get(latest_released_version, 'version')
+                        filters['collection_version'] = get(version, 'version')
+                elif is_collection_specified and 'expansion' not in self.kwargs:
+                    from core.collections.models import Collection
+                    version = Collection.objects.filter(
+                        **params, mnemonic=self.kwargs['collection'], version=self.kwargs['version']
+                    ).first()
 
             if is_collection_specified:
                 owner_type = filters.pop('ownerType', None)
@@ -325,6 +346,10 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
                     filters['collection_owner_url'] = f"/orgs/{owner}/"
                 if not is_version_specified:
                     filters['collection_version'] = HEAD
+                if 'expansion' in self.kwargs:
+                    filters['expansion'] = self.kwargs.get('expansion')
+                elif version:
+                    filters['expansion'] = get(version, 'expansion.mnemonic', 'NO_EXPANSION')
             if is_source_specified and not is_version_specified:
                 filters['source_version'] = HEAD
         return filters
@@ -454,6 +479,8 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         if self.should_perform_es_search():
             results = self.document_model.search()
             default_filters = self.default_filters.copy()
+            if self.is_user_document() and self.should_include_inactive():
+                default_filters.pop('is_active', None)
             if self.is_source_child_document_model() and self.__should_query_latest_version():
                 default_filters['is_latest_version'] = True
 
@@ -509,7 +536,8 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
                 kwargs_filters = self.get_kwargs_filters()
                 if self.get_view_name() in ['Organization Collection List', 'Organization Source List']:
                     kwargs_filters['ownerType'] = 'Organization'
-                    kwargs_filters['owner'] = list(self.request.user.organizations.values_list('mnemonic', flat=True))
+                    kwargs_filters['owner'] = list(
+                        self.request.user.organizations.values_list('mnemonic', flat=True)) or ['UNKNOWN-ORG-DUMMY']
                 elif self.user_is_self and is_authenticated:
                     kwargs_filters['ownerType'] = 'User'
                     kwargs_filters['owner'] = username
@@ -517,7 +545,7 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
             for key, value in kwargs_filters.items():
                 attr = to_snake_case(key)
                 if isinstance(value, list):
-                    criteria = Q('match', **{attr: value[0]})
+                    criteria = Q('match', **{attr: get(value, '0')})
                     for val in value[1:]:
                         criteria |= Q('match', **{attr: val})
                     results = results.query(criteria)

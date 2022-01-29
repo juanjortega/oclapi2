@@ -7,7 +7,7 @@ from rest_framework.exceptions import ErrorDetail
 
 from core.collections.models import CollectionReference, Collection
 from core.collections.serializers import CollectionVersionExportSerializer, CollectionReferenceSerializer
-from core.collections.tests.factories import OrganizationCollectionFactory, UserCollectionFactory
+from core.collections.tests.factories import OrganizationCollectionFactory, UserCollectionFactory, ExpansionFactory
 from core.common.tasks import export_collection
 from core.common.tests import OCLAPITestCase
 from core.common.utils import get_latest_dir_in_path
@@ -17,12 +17,16 @@ from core.mappings.serializers import MappingDetailSerializer
 from core.mappings.tests.factories import MappingFactory
 from core.orgs.tests.factories import OrganizationFactory
 from core.sources.tests.factories import OrganizationSourceFactory
+from core.users.models import UserProfile
 from core.users.tests.factories import UserProfileFactory
 
 
 class CollectionListViewTest(OCLAPITestCase):
     def test_get_200(self):
         coll = OrganizationCollectionFactory(mnemonic='coll1')
+        expansion = ExpansionFactory(collection_version=coll)
+        coll.expansion_uri = expansion.uri
+        coll.save()
 
         response = self.client.get(
             '/collections/',
@@ -70,7 +74,10 @@ class CollectionListViewTest(OCLAPITestCase):
         self.assertEqual(response.data[0]['short_code'], 'coll1')
         self.assertEqual(response.data[0]['id'], 'coll1')
         self.assertEqual(response.data[0]['url'], coll.uri)
-        self.assertEqual(response.data[0]['summary'], dict(versions=1, active_concepts=1, active_mappings=0))
+        self.assertEqual(
+            response.data[0]['summary'],
+            dict(versions=1, active_concepts=1, active_mappings=0, active_references=1, expansions=1)
+        )
 
     def test_post_201(self):
         org = OrganizationFactory(mnemonic='org')
@@ -116,6 +123,108 @@ class CollectionListViewTest(OCLAPITestCase):
         user_collection = user.collection_set.first()
 
         self.assertNotEqual(org_collection.id, user_collection.id)
+
+    def test_post_201_with_autoexpand_head(self):
+        org = OrganizationFactory(mnemonic='org')
+        user = UserProfileFactory(organizations=[org], username='user')
+        token = user.get_token()
+        response = self.client.post(
+            '/orgs/org/collections/',
+            dict(
+                default_locale='en', supported_locales='en,fr', id='coll', name='Collection', mnemonic='coll',
+                extras=dict(foo='bar')
+            ),
+            HTTP_AUTHORIZATION='Token ' + token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNotNone(response.data['uuid'])
+        collection = Collection.objects.last()
+        self.assertEqual(str(collection.id), response.data['uuid'])
+        self.assertEqual(collection.expansions.count(), 1)
+        expansion = collection.expansions.first()
+        self.assertEqual(collection.expansion_uri, expansion.uri)
+        self.assertEqual(collection.expansion.id, expansion.id)
+        self.assertEqual(collection.expansion.mnemonic, 'autoexpand-HEAD')
+        self.assertEqual(collection.expansion.concepts.count(), 0)
+
+        concept = ConceptFactory()
+        response = self.client.put(
+            '/orgs/org/collections/coll/references/',
+            dict(data=dict(concepts=[concept.uri])),
+            HTTP_AUTHORIZATION='Token ' + token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        collection.refresh_from_db()
+        self.assertEqual(collection.references.count(), 1)
+        self.assertEqual(collection.expansion.concepts.count(), 1)
+        self.assertEqual(collection.expansion.active_concepts, 1)
+        self.assertEqual(collection.expansion.active_mappings, 0)
+        self.assertEqual(collection.concepts.count(), 0)
+        self.assertTrue(collection.references.filter(expression=concept.get_latest_version().uri).exists())
+        self.assertEqual(
+            response.data,
+            [
+                dict(
+                    added=True, expression=concept.get_latest_version().uri,
+                    message='Added the latest versions of concept to the collection. Future updates will not be added'
+                            ' automatically.'
+                )
+            ]
+        )
+
+    def test_post_201_with_autoexpand_head_false(self):
+        org = OrganizationFactory(mnemonic='org')
+        user = UserProfileFactory(organizations=[org], username='user')
+        token = user.get_token()
+        response = self.client.post(
+            '/orgs/org/collections/',
+            dict(
+                default_locale='en', supported_locales='en,fr', id='coll', name='Collection', mnemonic='coll',
+                extras=dict(foo='bar'), autoexpand_head=False
+            ),
+            HTTP_AUTHORIZATION='Token ' + token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNotNone(response.data['uuid'])
+        collection = Collection.objects.last()
+        self.assertEqual(str(collection.id), response.data['uuid'])
+        self.assertIsNone(collection.expansion_uri)
+        self.assertEqual(collection.expansions.count(), 0)
+        self.assertEqual(collection.concepts.count(), 0)
+
+        concept = ConceptFactory()
+        response = self.client.put(
+            '/orgs/org/collections/coll/references/',
+            dict(data=dict(concepts=[concept.uri])),
+            HTTP_AUTHORIZATION='Token ' + token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        collection.refresh_from_db()
+        self.assertEqual(collection.references.count(), 1)
+        self.assertEqual(collection.expansions.count(), 0)
+        self.assertEqual(collection.active_concepts, None)
+        self.assertEqual(collection.active_mappings, None)
+        self.assertEqual(collection.concepts.count(), 0)
+        self.assertFalse(collection.references.filter(expression=concept.get_latest_version().uri).exists())
+        self.assertTrue(collection.references.filter(expression=concept.uri).exists())
+        self.assertEqual(
+            response.data,
+            [
+                dict(
+                    added=True, expression=concept.uri,
+                    message='Added the latest versions of concept to the collection. Future updates will not be added'
+                            ' automatically.'
+                )
+            ]
+        )
 
     def test_post_400(self):
         org = OrganizationFactory(mnemonic='org')
@@ -188,8 +297,8 @@ class CollectionRetrieveUpdateDestroyViewTest(OCLAPITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['uuid'], str(coll.id))
-        self.assertEqual(response.data['active_concepts'], 0)
-        self.assertEqual(response.data['active_mappings'], 0)
+        self.assertEqual(response.data['active_concepts'], None)
+        self.assertEqual(response.data['active_mappings'], None)
         self.assertEqual(response.data['versions'], 1)
 
     def test_get_404(self):
@@ -200,27 +309,17 @@ class CollectionRetrieveUpdateDestroyViewTest(OCLAPITestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    @patch('core.common.services.S3.delete_objects', Mock())
-    def test_delete(self):
+    @patch('core.common.models.delete_s3_objects')
+    def test_delete_204(self, delete_s3_objects_mock):  # sync delete
         coll = OrganizationCollectionFactory(mnemonic='coll1')
-        coll_v1 = OrganizationCollectionFactory(
-            version='v1', is_latest_version=True, mnemonic='coll1', organization=coll.organization
-        )
+        OrganizationCollectionFactory(
+            version='v1', is_latest_version=True, mnemonic='coll1', organization=coll.organization)
         user = UserProfileFactory(organizations=[coll.organization])
 
         self.assertEqual(coll.versions.count(), 2)
 
         response = self.client.delete(
-            coll_v1.uri,
-            HTTP_AUTHORIZATION='Token ' + user.get_token(),
-            format='json'
-        )
-
-        self.assertEqual(response.status_code, 204)
-        self.assertEqual(coll.versions.count(), 1)
-
-        response = self.client.delete(
-            coll.uri,
+            coll.uri + '?inline=true',
             HTTP_AUTHORIZATION='Token ' + user.get_token(),
             format='json'
         )
@@ -228,6 +327,25 @@ class CollectionRetrieveUpdateDestroyViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 204)
         self.assertEqual(coll.versions.count(), 0)
         self.assertFalse(Collection.objects.filter(mnemonic='coll1').exists())
+        delete_s3_objects_mock.delay.assert_called_once_with(f'{coll.organization.mnemonic}/coll1_HEAD.')
+
+    @patch('core.collections.views.delete_collection')
+    def test_delete_202(self, delete_collection_task_mock):  # async delete
+        delete_collection_task_mock.delay = Mock(return_value=Mock(id='task-id'))
+        coll = OrganizationCollectionFactory(mnemonic='coll1')
+        OrganizationCollectionFactory(
+            version='v1', is_latest_version=True, mnemonic='coll1', organization=coll.organization)
+        user = UserProfileFactory(organizations=[coll.organization])
+
+        response = self.client.delete(
+            coll.uri,
+            HTTP_AUTHORIZATION='Token ' + user.get_token(),
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data, dict(task='task-id'))
+        delete_collection_task_mock.delay.assert_called_once_with(coll.id)
 
     def test_put_401(self):
         coll = OrganizationCollectionFactory(mnemonic='coll1', name='Collection')
@@ -281,14 +399,17 @@ class CollectionReferencesViewTest(OCLAPITestCase):
         self.user = UserProfileFactory(username='foobar')
         self.token = self.user.get_token()
         self.collection = UserCollectionFactory(mnemonic='coll', user=self.user)
+        self.expansion = ExpansionFactory(collection_version=self.collection)
+        self.collection.expansion_uri = self.expansion.uri
+        self.collection.save()
         self.concept = ConceptFactory()
         self.reference = CollectionReference(expression=self.concept.uri)
         self.reference.full_clean()
         self.reference.save()
         self.collection.references.add(self.reference)
-        self.collection.concepts.set(self.reference.concepts)
+        self.expansion.concepts.set(self.reference.concepts)
         self.assertEqual(self.collection.references.count(), 1)
-        self.assertEqual(self.collection.concepts.count(), 1)
+        self.assertEqual(self.expansion.concepts.count(), 1)
 
     def test_get_404(self):
         response = self.client.get(
@@ -354,7 +475,7 @@ class CollectionReferencesViewTest(OCLAPITestCase):
 
         self.assertEqual(response.status_code, 204)
         self.assertEqual(self.collection.references.count(), 1)
-        self.assertEqual(self.collection.concepts.count(), 1)
+        self.assertEqual(self.collection.expansion.concepts.count(), 1)
 
     def test_delete_204_all_expressions(self):
         response = self.client.delete(
@@ -366,7 +487,7 @@ class CollectionReferencesViewTest(OCLAPITestCase):
 
         self.assertEqual(response.status_code, 204)
         self.assertEqual(self.collection.references.count(), 0)
-        self.assertEqual(self.collection.concepts.count(), 0)
+        self.assertEqual(self.collection.expansion.concepts.count(), 0)
 
     def test_delete_204_specific_expression(self):
         response = self.client.delete(
@@ -378,7 +499,7 @@ class CollectionReferencesViewTest(OCLAPITestCase):
 
         self.assertEqual(response.status_code, 204)
         self.assertEqual(self.collection.references.count(), 0)
-        self.assertEqual(self.collection.concepts.count(), 0)
+        self.assertEqual(self.collection.expansion.concepts.count(), 0)
 
         concept = ConceptFactory()
         latest_version = concept.get_latest_version()
@@ -392,8 +513,8 @@ class CollectionReferencesViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 200)
         self.collection.refresh_from_db()
         self.assertEqual(self.collection.references.count(), 2)
-        self.assertEqual(self.collection.concepts.count(), 1)
-        self.assertEqual(self.collection.mappings.count(), 1)
+        self.assertEqual(self.collection.expansion.concepts.count(), 1)
+        self.assertEqual(self.collection.expansion.mappings.count(), 1)
 
         response = self.client.delete(
             self.collection.uri + 'references/?cascade=sourcemappings',
@@ -404,8 +525,8 @@ class CollectionReferencesViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 204)
         self.collection.refresh_from_db()
         self.assertEqual(self.collection.references.count(), 0)
-        self.assertEqual(self.collection.concepts.count(), 0)
-        self.assertEqual(self.collection.mappings.count(), 0)
+        self.assertEqual(self.collection.expansion.concepts.count(), 0)
+        self.assertEqual(self.collection.expansion.mappings.count(), 0)
 
     @patch('core.collections.views.add_references')
     def test_put_202_all(self, add_references_mock):
@@ -454,7 +575,7 @@ class CollectionReferencesViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 200)
         self.collection.refresh_from_db()
         self.assertEqual(self.collection.references.count(), 2)
-        self.assertEqual(self.collection.concepts.count(), 2)
+        self.assertEqual(self.collection.expansion.concepts.count(), 2)
         self.assertEqual(self.collection.active_concepts, 2)
         self.assertEqual(self.collection.active_mappings, 0)
         self.assertTrue(self.collection.references.filter(expression=concept2.get_latest_version().uri).exists())
@@ -481,8 +602,8 @@ class CollectionReferencesViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 200)
         self.collection.refresh_from_db()
         self.assertEqual(self.collection.references.count(), 3)
-        self.assertEqual(self.collection.concepts.count(), 2)
-        self.assertEqual(self.collection.mappings.count(), 1)
+        self.assertEqual(self.collection.expansion.concepts.count(), 2)
+        self.assertEqual(self.collection.expansion.mappings.count(), 1)
         self.assertEqual(self.collection.active_concepts, 2)
         self.assertEqual(self.collection.active_mappings, 1)
         self.assertTrue(self.collection.references.filter(expression=mapping.get_latest_version().uri).exists())
@@ -510,8 +631,8 @@ class CollectionReferencesViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 200)
         self.collection.refresh_from_db()
         self.assertEqual(self.collection.references.count(), 5)
-        self.assertEqual(self.collection.concepts.count(), 3)
-        self.assertEqual(self.collection.mappings.count(), 2)
+        self.assertEqual(self.collection.expansion.concepts.count(), 3)
+        self.assertEqual(self.collection.expansion.mappings.count(), 2)
         self.assertEqual(self.collection.active_concepts, 3)
         self.assertEqual(self.collection.active_mappings, 2)
         self.assertTrue(self.collection.references.filter(expression=mapping2.get_latest_version().uri).exists())
@@ -645,8 +766,8 @@ class CollectionVersionRetrieveUpdateDestroyViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data, {'version': [ErrorDetail(string='This field may not be null.', code='null')]})
 
-    @patch('core.common.services.S3.delete_objects', Mock())
-    def test_delete(self):
+    @patch('core.common.models.delete_s3_objects')
+    def test_delete(self, delete_s3_objects_mock):
         response = self.client.delete(
             self.collection_v1.uri,
             HTTP_AUTHORIZATION='Token ' + self.token,
@@ -656,15 +777,7 @@ class CollectionVersionRetrieveUpdateDestroyViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 204)
         self.assertEqual(self.collection.versions.count(), 1)
         self.assertTrue(self.collection.versions.first().is_latest_version)
-
-        response = self.client.delete(
-            f'/users/{self.collection.parent.mnemonic}/collections/'
-            f'{self.collection.mnemonic}/{self.collection.version}/',
-            HTTP_AUTHORIZATION='Token ' + self.token,
-            format='json'
-        )
-        self.assertEqual(response.status_code, 204)
-        self.assertFalse(Collection.objects.filter(id=self.collection.id).exists())
+        delete_s3_objects_mock.delay.assert_called_once_with(f'{self.collection.parent.mnemonic}/coll_v1.')
 
 
 class CollectionLatestVersionRetrieveUpdateViewTest(OCLAPITestCase):
@@ -996,11 +1109,40 @@ class CollectionVersionListViewTest(OCLAPITestCase):
         self.assertEqual(self.collection.versions.count(), 2)
 
         last_created_version = self.collection.versions.order_by('created_at').last()
+        self.assertEqual(last_created_version, self.collection.get_latest_version())
         self.assertEqual(last_created_version.version, 'v1')
         self.assertEqual(last_created_version.description, 'version1')
-        self.assertEqual(last_created_version.concepts.count(), 1)
+        self.assertIsNotNone(last_created_version.expansion_uri)
+        self.assertEqual(last_created_version.expansions.count(), 1)
         self.assertEqual(last_created_version.references.count(), 1)
+        self.assertEqual(last_created_version.concepts.count(), 0)
+        self.assertEqual(last_created_version.mappings.count(), 0)
+
+        expansion = last_created_version.expansions.first()
+        self.assertEqual(expansion.concepts.count(), 1)
+        self.assertEqual(expansion.mappings.count(), 0)
+
+    def test_post_201_autoexpand_false(self):
+        response = self.client.post(
+            self.collection.uri + 'versions/',
+            dict(id='v1', description='version1', autoexpand=False),
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['version'], 'v1')
+        self.assertEqual(self.collection.versions.count(), 2)
+
+        last_created_version = self.collection.versions.order_by('created_at').last()
         self.assertEqual(last_created_version, self.collection.get_latest_version())
+        self.assertEqual(last_created_version.version, 'v1')
+        self.assertEqual(last_created_version.description, 'version1')
+        self.assertIsNone(last_created_version.expansion_uri)
+        self.assertEqual(last_created_version.expansions.count(), 0)
+        self.assertEqual(last_created_version.references.count(), 1)
+        self.assertEqual(last_created_version.concepts.count(), 0)
+        self.assertEqual(last_created_version.mappings.count(), 0)
 
 
 class ExportCollectionTaskTest(OCLAPITestCase):
@@ -1013,6 +1155,10 @@ class ExportCollectionTaskTest(OCLAPITestCase):
         concept2 = ConceptFactory(parent=source)
         mapping = MappingFactory(from_concept=concept2, to_concept=concept1, parent=source)
         collection = OrganizationCollectionFactory()
+        expansion = ExpansionFactory(collection_version=collection)
+        collection.expansion_uri = expansion.uri
+        collection.save()
+
         collection.add_references([concept1.uri, concept2.uri, mapping.uri])
         collection.refresh_from_db()
 
@@ -1066,6 +1212,9 @@ class CollectionConceptsViewTest(OCLAPITestCase):
         super().setUp()
         self.user = UserProfileFactory()
         self.collection = UserCollectionFactory(user=self.user)
+        self.expansion = ExpansionFactory(collection_version=self.collection)
+        self.collection.expansion_uri = self.expansion.uri
+        self.collection.save()
         self.token = self.user.get_token()
 
     def test_get_200(self):
@@ -1082,7 +1231,8 @@ class CollectionConceptsViewTest(OCLAPITestCase):
         source2 = OrganizationSourceFactory()
         concept1 = ConceptFactory(parent=source1, mnemonic='concept')
         concept2 = ConceptFactory(parent=source2, mnemonic='concept')
-        self.collection.add_references([concept1.uri, concept2.uri])
+        concept3 = ConceptFactory(parent=source2, mnemonic='concept3')
+        self.collection.add_references([concept1.uri, concept2.uri, concept3.uri])
 
         response = self.client.get(
             self.collection.concepts_url,
@@ -1091,7 +1241,32 @@ class CollectionConceptsViewTest(OCLAPITestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(len(response.data), 3)
+
+        response = self.client.get(
+            self.collection.uri + 'concepts/concept3/',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['id'], 'concept3')
+        self.assertEqual(response.data['url'], concept3.uri)
+
+        response = self.client.get(
+            self.collection.uri + 'concepts/concept/',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+        self.assertEqual(response.status_code, 409)
+
+        response = self.client.get(
+            self.collection.uri + f'concepts/concept/?uri={concept2.uri}',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['id'], 'concept')
+        self.assertEqual(response.data['url'], concept2.uri)
 
     def test_get_duplicate_concept_name_from_multiple_sources_200(self):
         source1 = OrganizationSourceFactory()
@@ -1116,6 +1291,110 @@ class CollectionConceptsViewTest(OCLAPITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['uuid'], str(concept2.get_latest_version().id))
+
+        response = self.client.get(
+            self.collection.concepts_url + f'concept/{concept2.get_latest_version().version}/?uri=' + concept2.uri,
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['uuid'], str(concept2.get_latest_version().id))
+
+
+class CollectionMappingsViewTest(OCLAPITestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = UserProfileFactory()
+        self.collection = UserCollectionFactory(user=self.user)
+        self.expansion = ExpansionFactory(collection_version=self.collection)
+        self.collection.expansion_uri = self.expansion.uri
+        self.collection.save()
+        self.token = self.user.get_token()
+
+    def test_get_200(self):
+        response = self.client.get(
+            self.collection.mappings_url,
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 0)
+
+        source1 = OrganizationSourceFactory()
+        source2 = OrganizationSourceFactory()
+        mapping1 = MappingFactory(parent=source1, mnemonic='mapping')
+        mapping2 = MappingFactory(parent=source2, mnemonic='mapping')
+        mapping3 = MappingFactory(parent=source2, mnemonic='mapping3')
+        self.collection.add_references([mapping1.uri, mapping2.uri, mapping3.uri])
+
+        response = self.client.get(
+            self.collection.mappings_url,
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 3)
+
+        response = self.client.get(
+            self.collection.uri + 'mappings/mapping3/',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['id'], 'mapping3')
+        self.assertEqual(response.data['url'], mapping3.uri)
+
+        response = self.client.get(
+            self.collection.uri + 'mappings/mapping/',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+        self.assertEqual(response.status_code, 409)
+
+        response = self.client.get(
+            self.collection.uri + f'mappings/mapping/?uri={mapping2.uri}',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['id'], 'mapping')
+        self.assertEqual(response.data['url'], mapping2.uri)
+
+    def test_get_duplicate_mapping_name_from_multiple_sources_200(self):
+        source1 = OrganizationSourceFactory()
+        source2 = OrganizationSourceFactory()
+        mapping1 = MappingFactory(parent=source1, mnemonic='mapping')
+        mapping2 = MappingFactory(parent=source2, mnemonic='mapping')
+        self.collection.add_references([mapping1.uri, mapping2.uri])
+
+        response = self.client.get(
+            self.collection.mappings_url + 'mapping/',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 409)
+
+        response = self.client.get(
+            self.collection.mappings_url + 'mapping/?uri=' + mapping2.uri,
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['uuid'], str(mapping2.get_latest_version().id))
+
+        response = self.client.get(
+            self.collection.mappings_url + f'mapping/{mapping2.get_latest_version().version}/?uri=' + mapping2.uri,
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['uuid'], str(mapping2.get_latest_version().id))
 
 
 class CollectionLogoViewTest(OCLAPITestCase):
@@ -1147,3 +1426,58 @@ class CollectionLogoViewTest(OCLAPITestCase):
         upload_base64_mock.assert_called_once_with(
             'base64-data', 'users/username/collections/coll1/logo.png', False, True
         )
+
+
+class CollectionSummaryViewTest(OCLAPITestCase):
+    @patch('core.collections.models.Collection.update_children_counts')
+    def test_put(self, update_children_counts_mock):
+        collection = OrganizationCollectionFactory(version='HEAD')
+        admin = UserProfile.objects.get(username='ocladmin')
+
+        response = self.client.put(
+            collection.uri + 'summary/',
+            HTTP_AUTHORIZATION='Token ' + admin.get_token(),
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 202)
+        update_children_counts_mock.assert_called_once()
+
+
+class CollectionVersionSummaryViewTest(OCLAPITestCase):
+    @patch('core.collections.models.Collection.update_children_counts')
+    def test_put(self, update_children_counts_mock):
+        collection = OrganizationCollectionFactory(version='v1')
+        admin = UserProfile.objects.get(username='ocladmin')
+
+        response = self.client.put(
+            collection.uri + 'summary/',
+            HTTP_AUTHORIZATION='Token ' + admin.get_token(),
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 202)
+        update_children_counts_mock.assert_called_once()
+
+
+class CollectionLatestVersionSummaryViewTest(OCLAPITestCase):
+    def test_get(self):
+        collection = OrganizationCollectionFactory(version='HEAD')
+        OrganizationCollectionFactory(
+            mnemonic=collection.mnemonic, organization=collection.organization, version='v1')
+        version2 = OrganizationCollectionFactory(
+            mnemonic=collection.mnemonic, organization=collection.organization, version='v2')
+        OrganizationCollectionFactory(
+            mnemonic=collection.mnemonic, organization=collection.organization, version='v3')
+
+        response = self.client.get(collection.uri + 'latest/summary/')
+        self.assertEqual(response.status_code, 404)
+
+        version2.released = True
+        version2.save()
+
+        response = self.client.get(collection.uri + 'latest/summary/',)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['uuid'], str(version2.id))
+        self.assertEqual(response.data['id'], 'v2')

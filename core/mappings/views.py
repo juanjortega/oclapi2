@@ -1,6 +1,5 @@
 from django.db.models import F, Q
 from django.http import QueryDict, Http404
-from django.shortcuts import get_object_or_404
 from drf_yasg.utils import swagger_auto_schema
 from pydash import get
 from rest_framework import status
@@ -63,7 +62,7 @@ class MappingListView(MappingBaseView, ListWithHeadersMixin, CreateModelMixin):
                             get(self.kwargs, 'version') == HEAD
         queryset = super().get_queryset()
         if is_latest_version:
-            queryset = queryset.filter(is_latest_version=True)
+            queryset = queryset.filter(id=F('versioned_object_id'))
 
         user = self.request.user
         if get(user, 'is_anonymous'):
@@ -178,9 +177,6 @@ class MappingRetrieveUpdateDestroyView(MappingBaseView, RetrieveAPIView, UpdateA
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    def is_hard_delete_requested(self):
-        return self.request.query_params.get('hardDelete', None) in ['true', True, 'True']
-
     def destroy(self, request, *args, **kwargs):
         mapping = self.get_object()
         parent = mapping.parent
@@ -199,11 +195,42 @@ class MappingRetrieveUpdateDestroyView(MappingBaseView, RetrieveAPIView, UpdateA
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class MappingCollectionMembershipView(MappingBaseView, ListWithHeadersMixin):
+    def get_serializer_class(self):
+        from core.collections.serializers import CollectionVersionListSerializer
+        return CollectionVersionListSerializer
+
+    def get_object(self, queryset=None):
+        queryset = Mapping.get_base_queryset(self.params)
+        if 'mapping_version' in self.kwargs:
+            instance = queryset.first()
+        else:
+            instance = queryset.filter(id=F('versioned_object_id')).first().get_latest_version()
+
+        if not instance:
+            raise Http404()
+
+        self.check_object_permissions(self.request, instance)
+
+        return instance
+
+    def get_queryset(self):
+        instance = self.get_object()
+
+        return instance.collection_set.filter(
+            organization_id=instance.parent.organization_id, user_id=instance.parent.user_id)
+
+    def get(self, request, *args, **kwargs):
+        return self.list(request, *args, **kwargs)
+
+
 class MappingReactivateView(MappingBaseView, UpdateAPIView):
     serializer_class = MappingDetailSerializer
 
     def get_object(self, queryset=None):
-        instance = get_object_or_404(self.get_queryset(), id=F('versioned_object_id'))
+        instance = self.get_queryset().filter(id=F('versioned_object_id')).first()
+        if not instance:
+            raise Http404()
         self.check_object_permissions(self.request, instance)
         return instance
 
@@ -265,6 +292,14 @@ class MappingVersionRetrieveView(MappingBaseView, RetrieveAPIView, DestroyAPIVie
 
         self.check_object_permissions(self.request, instance)
         return instance
+
+    def destroy(self, request, *args, **kwargs):
+        obj = self.get_object()
+        if self.is_hard_delete_requested():
+            obj.delete()
+        else:
+            obj.soft_delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class MappingExtrasView(SourceChildExtrasView, MappingBaseView):

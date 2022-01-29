@@ -1,4 +1,4 @@
-from django.urls import re_path, include
+from django.urls import re_path, path
 
 from core.collections.feeds import CollectionFeed
 from core.common.constants import NAMESPACE_PATTERN
@@ -47,8 +47,36 @@ urlpatterns = [
         views.CollectionVersionExportView.as_view(),
         name='collectionversion-latest-export-detail'
     ),
-    re_path(fr"^(?P<collection>{NAMESPACE_PATTERN})/concepts/", include('core.concepts.urls')),
-    re_path(fr"^(?P<collection>{NAMESPACE_PATTERN})/mappings/", include('core.mappings.urls')),
+    path(
+        "<str:collection>/concepts/<str:concept>/<str:concept_version>/",
+        views.CollectionVersionConceptRetrieveView.as_view(),
+        name='concept-version-detail'
+    ),
+    path(
+        "<str:collection>/concepts/<str:concept>/",
+        views.CollectionVersionConceptRetrieveView.as_view(),
+        name='concept-detail'
+    ),
+    re_path(
+        fr"^(?P<collection>{NAMESPACE_PATTERN})/concepts/",
+        views.CollectionVersionConceptsView.as_view(),
+        name='concept-list'
+    ),
+    path(
+        "<str:collection>/mappings/<str:mapping>/<str:mapping_version>/",
+        views.CollectionVersionMappingRetrieveView.as_view(),
+        name='mapping-version-detail'
+    ),
+    path(
+        "<str:collection>/mappings/<str:mapping>/",
+        views.CollectionVersionMappingRetrieveView.as_view(),
+        name='mapping-detail'
+    ),
+    re_path(
+        fr"^(?P<collection>{NAMESPACE_PATTERN})/mappings/",
+        views.CollectionVersionMappingsView.as_view(),
+        name='mapping-list'
+    ),
     re_path(
         fr'^(?P<collection>{NAMESPACE_PATTERN})/references/$',
         views.CollectionReferencesView.as_view(),
@@ -75,6 +103,29 @@ urlpatterns = [
         name='collection-version-summary'
     ),
     re_path(
+        r'^(?P<collection>{pattern})/(?P<version>{pattern})/expansions/$'.format(pattern=NAMESPACE_PATTERN),
+        views.CollectionVersionExpansionsView.as_view(),
+        name='expansion-list'
+    ),
+    re_path(
+        r'^(?P<collection>{pattern})/(?P<version>{pattern})/expansions/(?P<expansion>{pattern})/$'.format(
+            pattern=NAMESPACE_PATTERN),
+        views.CollectionVersionExpansionView.as_view(),
+        name='collection-version-expansion-detail'
+    ),
+    re_path(
+        r'^(?P<collection>{pattern})/(?P<version>{pattern})/expansions/(?P<expansion>{pattern})/concepts/$'.format(
+            pattern=NAMESPACE_PATTERN),
+        views.CollectionVersionExpansionConceptsView.as_view(),
+        name='collection-version-expansion-concepts'
+    ),
+    re_path(
+        r'^(?P<collection>{pattern})/(?P<version>{pattern})/expansions/(?P<expansion>{pattern})/mappings/$'.format(
+            pattern=NAMESPACE_PATTERN),
+        views.CollectionVersionExpansionMappingsView.as_view(),
+        name='collection-version-expansion-mappings'
+    ),
+    re_path(
         r"^(?P<collection>{pattern})/extras/(?P<extra>{pattern})/$".format(pattern=NAMESPACE_PATTERN),
         views.CollectionExtraRetrieveUpdateDestroyView.as_view(),
         name='collection-extra'
@@ -95,17 +146,39 @@ urlpatterns = [
         views.CollectionExtraRetrieveUpdateDestroyView.as_view(),
         name='collectionversion-extra'
     ),
+    path(
+        "<str:collection>/<str:version>/concepts/<str:concept>/<str:concept_version>/",
+        views.CollectionVersionConceptRetrieveView.as_view(),
+        name='concept-version-detail'
+    ),
+    path(
+        "<str:collection>/<str:version>/concepts/<str:concept>/",
+        views.CollectionVersionConceptRetrieveView.as_view(),
+        name='concept-detail'
+    ),
     re_path(
         r"^(?P<collection>{pattern})/(?P<version>{pattern})/concepts/".format(
             pattern=NAMESPACE_PATTERN
         ),
-        include('core.concepts.urls')
+        views.CollectionVersionConceptsView.as_view(),
+        name='concept-list'
+    ),
+    path(
+        "<str:collection>/<str:version>/mappings/<str:mapping>/<str:mapping_version>/",
+        views.CollectionVersionMappingRetrieveView.as_view(),
+        name='mapping-version-detail'
+    ),
+    path(
+        "<str:collection>/<str:version>/mappings/<str:mapping>/",
+        views.CollectionVersionMappingRetrieveView.as_view(),
+        name='mapping-detail'
     ),
     re_path(
         r"^(?P<collection>{pattern})/(?P<version>{pattern})/mappings/".format(
             pattern=NAMESPACE_PATTERN
         ),
-        include('core.mappings.urls')
+        views.CollectionVersionMappingsView.as_view(),
+        name='mapping-list'
     ),
     re_path(
         r'^(?P<collection>{pattern})/(?P<version>{pattern})/references/$'.format(pattern=NAMESPACE_PATTERN),
