@@ -17,7 +17,6 @@ class ConceptDocument(Document):
     _name = fields.KeywordField(attr='display_name', normalizer='lowercase')
     last_update = fields.DateField(attr='updated_at')
     locale = fields.ListField(fields.KeywordField())
-    all_names = fields.ListField(fields.KeywordField())
     source = fields.KeywordField(attr='parent_resource', normalizer="lowercase")
     owner = fields.KeywordField(attr='owner_name', normalizer="lowercase")
     owner_type = fields.KeywordField(attr='owner_type')
@@ -66,12 +65,6 @@ class ConceptDocument(Document):
     def prepare_locale(instance):
         return list(
             instance.names.filter(locale__isnull=False).distinct('locale').values_list('locale', flat=True)
-        )
-
-    @staticmethod
-    def prepare_all_names(instance):
-        return list(
-            instance.names.filter(name__isnull=False).distinct('name').values_list('name', flat=True)
         )
 
     @staticmethod

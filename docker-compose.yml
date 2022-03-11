@@ -21,6 +21,10 @@ services:
   api:
     image: openconceptlab/oclapi2:${ENVIRONMENT-production}
     restart: "always"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1g"
     ports:
       - 8000:8000
     environment:
