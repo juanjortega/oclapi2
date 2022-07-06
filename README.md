@@ -35,6 +35,7 @@ The new and improved OCL terminology service v2
 
 
 #### Crear archivo .env
+API_SUPERUSER_PASSWORD corresponde al password del usuario ocladmin.
 
 ```conf
 ENVIRONMENT=development|production
