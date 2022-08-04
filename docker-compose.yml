@@ -228,6 +228,7 @@ services:
         hard: -1
     ports:
       - 9200:9200
+    user: "1000:1000"
     volumes:
       - ./es-data/data:/usr/share/elasticsearch/data
     restart: "always"
