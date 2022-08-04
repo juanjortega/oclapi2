@@ -1,6 +1,9 @@
 import logging
+import time
 
-from core.common.constants import VERSION_HEADER, REQUEST_USER_HEADER
+from request_logging.middleware import LoggingMiddleware
+from core.common.constants import VERSION_HEADER, REQUEST_USER_HEADER, RESPONSE_TIME_HEADER, REQUEST_URL_HEADER, \
+    REQUEST_METHOD_HEADER
 from core.common.utils import set_current_user, set_request_url
 
 request_logger = logging.getLogger('request_logger')
@@ -10,6 +13,13 @@ MAX_BODY_LENGTH = 50000
 class BaseMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
+
+
+class CustomLoggerMiddleware(LoggingMiddleware):
+    def __call__(self, request):
+        if request.META.get('HTTP_USER_AGENT', '').startswith('ELB-HealthChecker'):
+            return self.get_response(request)
+        return super().__call__(request)
 
 
 class FixMalformedLimitParamMiddleware(BaseMiddleware):
@@ -31,10 +41,14 @@ class FixMalformedLimitParamMiddleware(BaseMiddleware):
 
 class ResponseHeadersMiddleware(BaseMiddleware):
     def __call__(self, request):
+        start_time = time.time()
         response = self.get_response(request)
         from django.conf import settings
         response[VERSION_HEADER] = settings.VERSION
         response[REQUEST_USER_HEADER] = str(getattr(request, 'user', None))
+        response[RESPONSE_TIME_HEADER] = time.time() - start_time
+        response[REQUEST_URL_HEADER] = request.path
+        response[REQUEST_METHOD_HEADER] = request.method
         return response
 
 

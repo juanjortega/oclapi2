@@ -1,3 +1,5 @@
+from uuid import UUID
+
 import factory
 from pydash import omit
 
@@ -191,6 +193,122 @@ class ConceptTest(OCLTestCase):
             concept.uri,
             f'/orgs/{source.organization.mnemonic}/sources/{source.mnemonic}/concepts/{concept.mnemonic}/'
         )
+
+    def test_persist_new_with_autoid_sequential(self):
+        source = OrganizationSourceFactory(
+            version=HEAD, autoid_concept_mnemonic='sequential', autoid_concept_external_id='sequential')
+        concept = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory), 'parent': source, 'mnemonic': None,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)]
+        })
+
+        self.assertEqual(concept.errors, {})
+        self.assertIsNotNone(concept.id)
+        self.assertEqual(concept.mnemonic, '1')
+        self.assertEqual(concept.external_id, '1')
+
+        concept = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory), 'parent': source, 'mnemonic': None,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)]
+        })
+
+        self.assertEqual(concept.errors, {})
+        self.assertIsNotNone(concept.id)
+        self.assertEqual(concept.mnemonic, '2')
+        self.assertEqual(concept.external_id, '2')
+
+        for concept in Concept.objects.filter(mnemonic='1'):
+            concept.delete()
+
+        concept = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory),
+            'parent': source,
+            'mnemonic': None,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)]
+        })
+
+        self.assertEqual(concept.errors, {})
+        self.assertIsNotNone(concept.id)
+        self.assertEqual(concept.mnemonic, '3')
+        self.assertEqual(concept.external_id, '3')
+
+        concept = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory),
+            'mnemonic': '1',
+            'external_id': '1',
+            'parent': source,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)]
+        })
+
+        self.assertEqual(concept.errors, {})
+        self.assertIsNotNone(concept.id)
+        self.assertEqual(concept.mnemonic, '1')
+        self.assertEqual(concept.external_id, '1')
+
+        concept = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory),
+            'mnemonic': None,
+            'parent': source,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)]
+        })
+
+        self.assertEqual(concept.errors, {})
+        self.assertIsNotNone(concept.id)
+        self.assertEqual(concept.mnemonic, '4')
+        self.assertEqual(concept.external_id, '4')
+
+        source.autoid_concept_mnemonic_start_from = 100
+        source.save()
+
+        concept = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory),
+            'mnemonic': None,
+            'parent': source,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)]
+        })
+
+        self.assertEqual(concept.errors, {})
+        self.assertIsNotNone(concept.id)
+        self.assertEqual(concept.mnemonic, '100')
+        self.assertEqual(concept.external_id, '5')
+
+        concept = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory),
+            'mnemonic': None,
+            'parent': source,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)]
+        })
+
+        self.assertEqual(concept.errors, {})
+        self.assertIsNotNone(concept.id)
+        self.assertEqual(concept.mnemonic, '101')
+        self.assertEqual(concept.external_id, '6')
+
+    def test_persist_new_with_autoid_uuid(self):
+        source = OrganizationSourceFactory(
+            version=HEAD, autoid_concept_mnemonic='uuid', autoid_concept_external_id='uuid')
+        concept1 = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory), 'parent': source, 'mnemonic': None,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)]
+        })
+
+        self.assertEqual(concept1.errors, {})
+        self.assertIsNotNone(concept1.id)
+        self.assertIsInstance(concept1.mnemonic, UUID)
+        self.assertIsInstance(concept1.external_id, UUID)
+
+        concept2 = Concept.persist_new({
+            **factory.build(dict, FACTORY_CLASS=ConceptFactory), 'parent': source, 'mnemonic': None,
+            'names': [LocalizedTextFactory.build(locale='en', name='English', locale_preferred=True)]
+        })
+
+        self.assertEqual(concept2.errors, {})
+        self.assertIsNotNone(concept2.id)
+        self.assertIsInstance(concept2.mnemonic, UUID)
+        self.assertIsInstance(concept2.external_id, UUID)
+
+        self.assertNotEqual(concept1.mnemonic, concept2.mnemonic)
+        self.assertNotEqual(concept1.external_id, concept2.external_id)
 
     def test_hierarchy_one_parent_child(self):
         parent_concept = ConceptFactory(
@@ -665,10 +783,10 @@ class ConceptTest(OCLTestCase):
         concept = ConceptFactory(
             descriptions=(es_locale, en_locale),
             names=(en_locale,),
-            sources=(source_version0,),
-            parent=source_version0
+            parent=source_head
         )
-        cloned_concept = Concept.version_for_concept(concept, 'v1', source_version0)
+        source_version0.concepts.add(concept)
+        cloned_concept = Concept.version_for_concept(concept, 'v1', source_head)
 
         self.assertEqual(
             Concept.persist_clone(cloned_concept),
@@ -682,13 +800,12 @@ class ConceptTest(OCLTestCase):
         ).first()
         self.assertEqual(persisted_concept.names.count(), 1)
         self.assertEqual(persisted_concept.descriptions.count(), 2)
-        self.assertEqual(persisted_concept.parent, source_version0)
-        self.assertEqual(persisted_concept.sources.count(), 2)
-        self.assertEqual(source_head.concepts.first().id, persisted_concept.id)
+        self.assertEqual(persisted_concept.parent, source_head)
+        self.assertEqual(persisted_concept.sources.count(), 1)
         self.assertEqual(
             persisted_concept.uri,
-            f'/orgs/{source_version0.organization.mnemonic}/sources/{source_version0.mnemonic}/'
-            f'{source_version0.version}/concepts/{persisted_concept.mnemonic}/{persisted_concept.version}/'
+            f'/orgs/{source_head.organization.mnemonic}/sources/{source_head.mnemonic}/'
+            f'concepts/{persisted_concept.mnemonic}/{persisted_concept.version}/'
         )
         self.assertEqual(
             persisted_concept.version_url, persisted_concept.uri
@@ -988,6 +1105,17 @@ class ConceptTest(OCLTestCase):
         self.assertEqual(child_child_concept.parent_concept_urls, [child_concept.uri])
         self.assertEqual(child_child_concept.parent_concepts_count, 1)
 
+    def test_has_children(self):
+        concept = ConceptFactory()
+
+        self.assertFalse(concept.has_children)
+
+        concept2 = ConceptFactory()
+        concept2.parent_concepts.add(concept)
+
+        self.assertTrue(concept.has_children)
+        self.assertFalse(concept2.has_children)
+
     def test_get_serializer_class(self):
         self.assertEqual(Concept.get_serializer_class(), ConceptListSerializer)
         self.assertEqual(Concept.get_serializer_class(version=True), ConceptVersionListSerializer)
@@ -1019,8 +1147,9 @@ class ConceptTest(OCLTestCase):
         source_version2 = OrganizationSourceFactory(
             version='v2', mnemonic=source.mnemonic, organization=source.organization)
 
-        cloned_concept = Concept.version_for_concept(concept, 'v1', source_version2)
+        cloned_concept = Concept.version_for_concept(concept, 'v1', source)
         Concept.persist_clone(cloned_concept, concept.created_by)
+
         self.assertEqual(concept.versions.count(), 2)
 
         concept_v1 = concept.get_latest_version()
@@ -1041,8 +1170,7 @@ class ConceptTest(OCLTestCase):
 
         concepts = Concept.from_uri_queryset(source_version2.uri + 'concepts/')
 
-        self.assertEqual(concepts.count(), 1)
-        self.assertEqual(concepts.first().id, concept_v1.id)
+        self.assertEqual(concepts.count(), 0)
 
         concepts = Concept.from_uri_queryset(source_version1.uri + 'concepts/')
         self.assertEqual(concepts.count(), 1)
@@ -1057,21 +1185,26 @@ class ConceptTest(OCLTestCase):
         source_version1 = OrganizationSourceFactory(
             version='v1', mnemonic=source.mnemonic, organization=source.organization)
         source_version1.seed_concepts(index=False)
-        source_version2 = OrganizationSourceFactory(
+        OrganizationSourceFactory(
             version='v2', mnemonic=source.mnemonic, organization=source.organization)
 
-        cloned_concept = Concept.version_for_concept(concept, 'v1', source_version2)
+        cloned_concept = Concept.version_for_concept(concept, 'v1', source)
         Concept.persist_clone(cloned_concept, concept.created_by)
         self.assertEqual(concept.versions.count(), 2)
 
         concept_v1 = concept.get_latest_version()
         collection = OrganizationCollectionFactory()
+        reference = CollectionReference(
+            expression=concept_v1.version_url, collection=collection, system=concept_v1.parent.uri, version='HEAD',
+            code=concept_v1.mnemonic, resource_version=concept_v1.version
+        )
+        reference.clean()
+        reference.save()
+
         collection_version1 = OrganizationCollectionFactory(
             version='v1', mnemonic=collection.mnemonic, organization=collection.organization)
+        collection_version1.seed_references()
         expansion = ExpansionFactory(collection_version=collection_version1)
-        reference = CollectionReference(expression=concept_v1.version_url)
-        reference.save()
-        collection_version1.references.add(reference)
         expansion.seed_children(index=False)
 
         self.assertEqual(expansion.concepts.count(), 1)
@@ -1091,7 +1224,8 @@ class ConceptTest(OCLTestCase):
         self.assertEqual(concepts.first().id, concept_v1.id)
 
         concepts = Concept.from_uri_queryset(collection.uri + 'concepts/')
-        self.assertEqual(concepts.count(), 0)
+        self.assertEqual(concepts.count(), 1)
+        self.assertEqual(concepts.first().id, concept_v1.id)
 
     def test_cascade_as_hierarchy(self):
         source = OrganizationSourceFactory()
@@ -1105,7 +1239,7 @@ class ConceptTest(OCLTestCase):
         root_child_child2_child = ConceptFactory(parent=source, mnemonic='root-child-child2-child')
         root_child_child2_child.parent_concepts.add(root_child_child2)
 
-        root_cascaded = root.cascade_as_hierarchy()
+        root_cascaded = root.cascade_as_hierarchy(root.sources.filter(version='HEAD').first())
 
         self.assertTrue(isinstance(root_cascaded, Concept))
         self.assertEqual(root_cascaded.uri, root.uri)
@@ -1144,7 +1278,8 @@ class ConceptTest(OCLTestCase):
         root_child_child2_child = ConceptFactory(parent=source, mnemonic='root-child-child2-child')
         root_child_child2_child.parent_concepts.add(root_child_child2)
 
-        root_child_child2_child_cascaded = root_child_child2_child.cascade_as_hierarchy(reverse=True)
+        root_child_child2_child_cascaded = root_child_child2_child.cascade_as_hierarchy(
+            root_child_child2_child.sources.filter(version='HEAD').first(), reverse=True)
 
         self.assertEqual(root_child_child2_child_cascaded.uri, root_child_child2_child.uri)
         root_child_child2_child_cascaded_entries = root_child_child2_child_cascaded.cascaded_entries

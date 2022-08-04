@@ -6,6 +6,7 @@ from datetime import datetime
 from celery import group
 from celery.utils.log import get_task_logger
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db.models import F
 from ocldev.oclfleximporter import OclFlexImporter
 from pydash import compact, get
@@ -14,7 +15,7 @@ from core.collections.models import Collection
 from core.common.constants import HEAD
 from core.common.services import RedisService
 from core.common.tasks import bulk_import_parts_inline, delete_organization, batch_index_resources
-from core.common.utils import drop_version, is_url_encoded_string, encode_string, to_parent_uri
+from core.common.utils import drop_version, is_url_encoded_string, encode_string, to_parent_uri, chunks
 from core.concepts.models import Concept
 from core.mappings.models import Mapping
 from core.orgs.models import Organization
@@ -143,8 +144,7 @@ class BaseResourceImporter:
 
         return UserProfile.objects.filter(username=owner).first()
 
-    @staticmethod
-    def exists():
+    def exists(self):
         return False
 
     def clean(self):
@@ -224,7 +224,7 @@ class SourceImporter(BaseResourceImporter):
 
         self.data['mnemonic'] = self.data.pop('id')
         self.data[owner_type] = owner
-        self.data['version'] = 'HEAD'
+        self.data['version'] = HEAD
 
         supported_locales = self.get('supported_locales')
         if isinstance(supported_locales, str):
@@ -307,7 +307,7 @@ class CollectionImporter(BaseResourceImporter):
 
         self.data['mnemonic'] = self.data.pop('id')
         self.data[owner_type] = owner
-        self.data['version'] = 'HEAD'
+        self.data['version'] = HEAD
 
         supported_locales = self.get('supported_locales')
         if isinstance(supported_locales, str):
@@ -360,7 +360,7 @@ class CollectionVersionImporter(BaseResourceImporter):
     def process(self):
         coll = Collection(**self.data)
         if coll.has_parent_edit_access(self.user):
-            errors = Collection.persist_new_version(coll, self.user)
+            errors = Collection.persist_new_version(obj=coll, user=self.user, sync=True)
             return errors or CREATED
         return PERMISSION_DENIED
 
@@ -369,12 +369,13 @@ class ConceptImporter(BaseResourceImporter):
     mandatory_fields = {"id"}
     allowed_fields = [
         "id", "external_id", "concept_class", "datatype", "names", "descriptions", "retired", "extras",
-        "parent_concept_urls",
+        "parent_concept_urls", 'update_comment', 'comment'
     ]
 
     def __init__(self, data, user, update_if_exists):
         super().__init__(data, user, update_if_exists)
         self.version = False
+        self.instance = None
 
     def exists(self):
         return self.get_queryset().exists()
@@ -395,7 +396,7 @@ class ConceptImporter(BaseResourceImporter):
         ).first()
         super().parse()
         self.data['parent'] = source
-        self.data['name'] = self.data['mnemonic'] = self.data.pop('id')
+        self.data['name'] = self.data['mnemonic'] = str(self.data.pop('id', ''))
         if not is_url_encoded_string(self.data['mnemonic']):
             self.data['mnemonic'] = encode_string(self.data['mnemonic'])
 
@@ -414,19 +415,23 @@ class ConceptImporter(BaseResourceImporter):
             return FAILED
         if parent.has_edit_access(self.user):
             if self.version:
-                instance = self.get_queryset().first().clone()
-                instance._counted = None  # pylint: disable=protected-access
+                self.instance = self.get_queryset().first().clone()
+                self.instance._counted = None  # pylint: disable=protected-access
+                self.instance._index = False  # pylint: disable=protected-access
                 errors = Concept.create_new_version_for(
-                    instance=instance, data=self.data, user=self.user, create_parent_version=False,
+                    instance=self.instance, data=self.data, user=self.user, create_parent_version=False,
                     add_prev_version_children=False
                 )
                 return errors or UPDATED
 
-            instance = Concept.persist_new(
-                data={**self.data, '_counted': None}, user=self.user, create_parent_version=False)
-            if instance.id:
+            if 'update_comment' in self.data:
+                self.data['comment'] = self.data['update_comment']
+                self.data.pop('update_comment')
+            self.instance = Concept.persist_new(
+                data={**self.data, '_counted': None, '_index': False}, user=self.user, create_parent_version=False)
+            if self.instance.id:
                 return CREATED
-            return instance.errors or FAILED
+            return self.instance.errors or FAILED
 
         return PERMISSION_DENIED
 
@@ -435,12 +440,13 @@ class MappingImporter(BaseResourceImporter):
     mandatory_fields = {"map_type", "from_concept_url"}
     allowed_fields = [
         "id", "map_type", "from_concept_url", "to_source_url", "to_concept_url", "to_concept_code",
-        "to_concept_name", "extras", "external_id", "retired"
+        "to_concept_name", "extras", "external_id", "retired", 'update_comment', 'comment'
     ]
 
     def __init__(self, data, user, update_if_exists):
         super().__init__(data, user, update_if_exists)
         self.version = False
+        self.instance = None
 
     def exists(self):
         return self.get_queryset().exists()
@@ -526,14 +532,18 @@ class MappingImporter(BaseResourceImporter):
             return FAILED
         if parent.has_edit_access(self.user):
             if self.version:
-                instance = self.get_queryset().first().clone()
-                instance._counted = None  # pylint: disable=protected-access
-                errors = Mapping.create_new_version_for(instance, self.data, self.user)
+                self.instance = self.get_queryset().first().clone()
+                self.instance._counted = None  # pylint: disable=protected-access
+                self.instance._index = False  # pylint: disable=protected-access
+                errors = Mapping.create_new_version_for(self.instance, self.data, self.user)
                 return errors or UPDATED
-            instance = Mapping.persist_new({**self.data, '_counted': None}, self.user)
-            if instance.id:
+            if 'update_comment' in self.data:
+                self.data['comment'] = self.data['update_comment']
+                self.data.pop('update_comment')
+            self.instance = Mapping.persist_new({**self.data, '_counted': None, '_index': False}, self.user)
+            if self.instance.id:
                 return CREATED
-            return instance.errors or FAILED
+            return self.instance.errors or FAILED
 
         return PERMISSION_DENIED
 
@@ -551,7 +561,7 @@ class ReferenceImporter(BaseResourceImporter):
 
         if self.get('collection', None):
             self.queryset = Collection.objects.filter(
-                **{self.get_owner_type_filter(): self.get('owner')}, mnemonic=self.get('collection'), version='HEAD'
+                **{self.get_owner_type_filter(): self.get('owner')}, mnemonic=self.get('collection'), version=HEAD
             )
         elif self.get('collection_url', None):
             self.queryset = Collection.objects.filter(uri=self.get('collection_url'))
@@ -566,18 +576,17 @@ class ReferenceImporter(BaseResourceImporter):
                 (added_references, _) = collection.add_expressions(
                     self.get('data'), self.user, self.get('__cascade', False)
                 )
-                if not get(settings, 'TEST_MODE', False):
+                if not get(settings, 'TEST_MODE', False):  # pragma: no cover
+                    concept_ids = []
+                    mapping_ids = []
                     for ref in added_references:
-                        if ref.concepts:
-                            batch_index_resources.apply_async(
-                                ('concept', dict(id__in=list(ref.concepts.values_list('id', flat=True)))),
-                                queue='indexing'
-                            )
-                        if ref.mappings:
-                            batch_index_resources.apply_async(
-                                ('mapping', dict(id__in=list(ref.mappings.values_list('id', flat=True)))),
-                                queue='indexing'
-                            )
+                        concept_ids += list(ref.concepts.values_list('id', flat=True))
+                        mapping_ids += list(ref.mappings.values_list('id', flat=True))
+
+                    if concept_ids:
+                        batch_index_resources.apply_async(('concept', dict(id__in=concept_ids)), queue='indexing')
+                    if mapping_ids:
+                        batch_index_resources.apply_async(('mapping', dict(id__in=mapping_ids)), queue='indexing')
 
                 return CREATED
             return PERMISSION_DENIED
@@ -643,15 +652,17 @@ class BulkImportInline(BaseImporter):
         self.others.append(item)
 
     def notify_progress(self):
-        if self.self_task_id:
+        if self.self_task_id:  # pragma: no cover
             service = RedisService()
             service.set(self.self_task_id, self.processed)
 
-    def run(self):
-        if self.self_task_id:
+    def run(self):  # pylint: disable=too-many-branches,too-many-statements,too-many-locals
+        if self.self_task_id:  # pragma: no cover
             print("****STARTED SUBPROCESS****")
             print(f"TASK ID: {self.self_task_id}")
             print("***************")
+        new_concept_ids = {}
+        new_mapping_ids = {}
         for original_item in self.input_list:
             self.processed += 1
             logger.info('Processing %s of %s', str(self.processed), str(self.total))
@@ -690,20 +701,41 @@ class BulkImportInline(BaseImporter):
                 )
                 continue
             if item_type == 'concept':
-                self.handle_item_import_result(
-                    ConceptImporter(item, self.user, self.update_if_exists).run(), original_item
-                )
+                concept_importer = ConceptImporter(item, self.user, self.update_if_exists)
+                _result = concept_importer.run()
+                if get(concept_importer.instance, 'id'):
+                    parent_url = concept_importer.instance.parent.uri
+                    if parent_url not in new_concept_ids:
+                        new_concept_ids[parent_url] = []
+                    new_concept_ids[parent_url].append(concept_importer.instance.mnemonic)
+                self.handle_item_import_result(_result, original_item)
                 continue
             if item_type == 'mapping':
-                self.handle_item_import_result(
-                    MappingImporter(item, self.user, self.update_if_exists).run(), original_item
-                )
+                mapping_importer = MappingImporter(item, self.user, self.update_if_exists)
+                _result = mapping_importer.run()
+                if get(mapping_importer.instance, 'id'):
+                    parent_url = mapping_importer.instance.parent.uri
+                    if parent_url not in new_mapping_ids:
+                        new_mapping_ids[parent_url] = []
+                    new_mapping_ids[parent_url].append(mapping_importer.instance.mnemonic)
+                self.handle_item_import_result(_result, original_item)
                 continue
             if item_type == 'reference':
                 self.handle_item_import_result(
                     ReferenceImporter(item, self.user, self.update_if_exists).run(), original_item
                 )
                 continue
+
+        if new_concept_ids:
+            for parent_url, ids in new_concept_ids.items():
+                for chunk in chunks(ids, 1000):
+                    batch_index_resources.apply_async(
+                        ('concept', dict(mnemonic__in=chunk, parent__uri=parent_url), True), queue='indexing')
+        if new_mapping_ids:
+            for parent_url, ids in new_mapping_ids.items():
+                for chunk in chunks(ids, 1000):
+                    batch_index_resources.apply_async(
+                        ('mapping', dict(mnemonic__in=chunk, parent__uri=parent_url), True), queue='indexing')
 
         self.elapsed_seconds = time.time() - self.start_time
 
@@ -715,7 +747,7 @@ class BulkImportInline(BaseImporter):
     def detailed_summary(self):
         return f"Processed: {self.processed}/{self.total} | Created: {len(self.created)} | " \
             f"Updated: {len(self.updated)} | DELETED: {len(self.deleted)} | Existing: {len(self.exists)} | " \
-            f"Permision Denied: {len(self.permission_denied)} | " \
+            f"Permision Denied: {len(self.permission_denied)} | Failed: {len(self.failed)} | " \
             f"Time: {self.elapsed_seconds}secs"
 
     @property
@@ -793,12 +825,15 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
 
         for data in self.input_list:
             line = data if isinstance(data, dict) else json.loads(data)
-            data_type = line.get('type', None).lower()
+            data_type = line.get('type', '').lower()
+            if not data_type:
+                raise ValidationError('"type" should be present in each line')
             if data_type not in ['organization', 'source', 'collection']:
                 if prev_line:
                     prev_type = prev_line.get('type').lower()
+                    children_data_types = ['concept', 'mapping', 'reference']
                     if prev_type == data_type or (
-                            data_type not in ['concept', 'mapping'] and prev_type not in ['concept', 'mapping']
+                            data_type not in children_data_types and prev_type not in children_data_types
                     ):
                         self.parts[-1].append(line)
                     else:
@@ -808,8 +843,43 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
                 prev_line = line
 
     @staticmethod
-    def chunker_list(seq, size):
-        return (seq[i::size] for i in range(size))
+    def chunker_list(seq, size, is_child):  # pylint: disable=too-many-locals
+        """
+            1. returns n number of sequential chunks from l.
+            2. makes sure concept versions are grouped in single list
+        """
+        sorted_seq = seq
+        is_source_child = False
+        if is_child:
+            part_type = get(seq, '0.type', '').lower()
+            is_source_child = part_type in ['concept']
+            if is_source_child:
+                sorted_seq = sorted(seq, key=lambda x: x['id'])
+        quotient, remainder = divmod(len(sorted_seq), size)
+        result = []
+        for i in range(size):
+            si = (quotient+1)*(i if i < remainder else remainder) + quotient*(0 if i < remainder else i - remainder)
+            current = list(sorted_seq[si:si + (quotient + 1 if i < remainder else quotient)])
+            if not is_source_child or not get(result, '-1', None):
+                if current:
+                    result.append(current)
+                continue
+            prev = get(result, '-1', None)
+            prev_last_id = get(prev, '-1.id', '').lower()
+            current_first_id = get(current, '0.id', '').lower()
+            shift = 0
+            if prev_last_id == current_first_id:
+                for resource in current:
+                    if resource['id'].lower() == prev_last_id:
+                        shift += 1
+                        result[-1].append(resource)
+                    else:
+                        break
+            if shift:
+                current = current[shift:]
+            if current:
+                result.append(current)
+        return result
 
     def is_any_process_alive(self):
         if not self.groups:
@@ -844,9 +914,6 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
             f"Time: {self.elapsed_seconds}secs"
 
         return dict(summary=summary)
-
-    def get_sub_task_ids(self):
-        return {task.task_id: task.state for task in self.tasks}
 
     def notify_progress(self):
         if self.self_task_id:
@@ -945,7 +1012,9 @@ class BulkImportParallelRunner(BaseImporter):  # pragma: no cover
         )
 
     def queue_tasks(self, part_list, is_child):
-        chunked_lists = compact(self.chunker_list(part_list, self.parallel) if is_child else [part_list])
+        has_delete_action = not is_child and any(line.get('__action') == 'DELETE' for line in part_list)
+        chunked_lists = [part_list] if has_delete_action else compact(
+            self.chunker_list(part_list, self.parallel, is_child))
         jobs = group(bulk_import_parts_inline.s(_list, self.username, self.update_if_exists) for _list in chunked_lists)
         group_result = jobs.apply_async(queue='concurrent')
         self.groups.append(group_result)

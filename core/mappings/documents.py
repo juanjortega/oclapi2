@@ -50,6 +50,10 @@ class MappingDocument(Document):
     created_by = fields.KeywordField(attr='created_by.username')
 
     @staticmethod
+    def get_boostable_search_attrs():
+        return dict(id=dict(boost=5), from_concept=dict(boost=3), to_concept=dict(boost=2))
+
+    @staticmethod
     def prepare_from_concept(instance):
         from_concept_name = get(instance, 'from_concept_name') or get(instance, 'from_concept.display_name')
         return [instance.from_concept_url, instance.from_concept_code, from_concept_name]
@@ -79,11 +83,7 @@ class MappingDocument(Document):
 
     @staticmethod
     def prepare_collection_version(instance):
-        collection_versions = list(instance.collection_set.values_list('version', flat=True))
-        expansion_collection_versions = list(
-            instance.expansion_set.values_list('collection_version__version', flat=True))
-
-        return list(set(collection_versions + expansion_collection_versions))
+        return list(set(instance.expansion_set.values_list('collection_version__version', flat=True)))
 
     @staticmethod
     def prepare_expansion(instance):
@@ -91,19 +91,15 @@ class MappingDocument(Document):
 
     @staticmethod
     def prepare_collection(instance):
-        collections = list(instance.collection_set.values_list('mnemonic', flat=True))
-        expansion_collections = list(instance.expansion_set.values_list('collection_version__mnemonic', flat=True))
-        return list(set(collections + expansion_collections))
+        return list(set(instance.expansion_set.values_list('collection_version__mnemonic', flat=True)))
 
     @staticmethod
     def prepare_collection_url(instance):
-        return list(set(list(instance.collection_set.values_list('uri', flat=True))))
+        return list(set(list(instance.expansion_set.values_list('collection_version__uri', flat=True))))
 
     @staticmethod
     def prepare_collection_owner_url(instance):
-        collection_owner_urls = [coll.parent_url for coll in instance.collection_set.all()]
-        expansion_collection_owner_urls = [expansion.owner_url for expansion in instance.expansion_set.all()]
-        return list(set(collection_owner_urls + expansion_collection_owner_urls))
+        return list(set(expansion.owner_url for expansion in instance.expansion_set.all()))
 
     @staticmethod
     def prepare_extras(instance):

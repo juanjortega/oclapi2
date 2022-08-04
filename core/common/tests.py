@@ -1,5 +1,5 @@
 import base64
-import unittest
+import os
 import uuid
 from unittest.mock import patch, Mock, mock_open
 
@@ -15,43 +15,35 @@ from moto import mock_s3
 from requests.auth import HTTPBasicAuth
 from rest_framework.test import APITestCase
 
-from core.collections.models import Collection
-from core.common.constants import HEAD, OCL_ORG_ID, SUPER_ADMIN_USER_ID
+from core.collections.models import CollectionReference
+from core.common.constants import HEAD
+from core.common.tasks import delete_s3_objects, bulk_import_parallel_inline
 from core.common.utils import (
     compact_dict_by_values, to_snake_case, flower_get, task_exists, parse_bulk_import_task_id,
     to_camel_case,
     drop_version, is_versioned_uri, separate_version, to_parent_uri, jsonify_safe, es_get,
     get_resource_class_from_resource_name, flatten_dict, is_csv_file, is_url_encoded_string, to_parent_uri_from_kwargs,
-    set_current_user, get_current_user, set_request_url, get_request_url, nested_dict_values)
-from core.concepts.models import Concept, LocalizedText
-from core.mappings.models import Mapping
+    set_current_user, get_current_user, set_request_url, get_request_url, nested_dict_values, chunks, api_get,
+    split_list_by_condition)
+from core.concepts.models import Concept
 from core.orgs.models import Organization
 from core.sources.models import Source
 from core.users.models import UserProfile
-from .services import S3
-
-
-def delete_all():
-    Collection.objects.all().delete()
-    Mapping.objects.all().delete()
-    Concept.objects.all().delete()
-    LocalizedText.objects.all().delete()
-    Source.objects.all().delete()
-    Organization.objects.exclude(id=OCL_ORG_ID).all().delete()
-    UserProfile.objects.exclude(id=SUPER_ADMIN_USER_ID).all().delete()
+from core.users.tests.factories import UserProfileFactory
+from .services import S3, PostgresQL
 
 
 class CustomTestRunner(ColourRunnerMixin, DiscoverRunner):
     pass
 
 
-class PauseElasticSearchIndex:
+class SetupTestEnvironment:
     settings.TEST_MODE = True
-    settings.ELASTICSEARCH_DSL_AUTOSYNC = False
-    settings.ES_SYNC = False
+    settings.ELASTICSEARCH_DSL_AUTOSYNC = True
+    settings.ES_SYNC = True
 
 
-class BaseTestCase(PauseElasticSearchIndex):
+class BaseTestCase(SetupTestEnvironment):
     @staticmethod
     def create_lookup_concept_classes(user=None, org=None):
         from core.sources.tests.factories import OrganizationSourceFactory
@@ -209,10 +201,6 @@ class OCLAPITestCase(APITestCase, BaseTestCase):
         super().setUpClass()
         call_command("loaddata", "core/fixtures/base_entities.yaml")
 
-    def tearDown(self):
-        super().tearDown()
-        delete_all()
-
 
 class OCLTestCase(TestCase, BaseTestCase):
     @classmethod
@@ -221,19 +209,14 @@ class OCLTestCase(TestCase, BaseTestCase):
         call_command("loaddata", "core/fixtures/base_entities.yaml")
         call_command("loaddata", "core/fixtures/auth_groups.yaml")
 
-    def tearDown(self):
-        super().tearDown()
-        delete_all()
-
 
 class S3Test(TestCase):
-    @unittest.skip('Failing on CI')
     @mock_s3
     def test_upload(self):
         _conn = boto3.resource('s3', region_name='us-east-1')
         _conn.create_bucket(Bucket='oclapi2-dev')
 
-        S3.upload('some/path', 'content')
+        S3._upload('some/path', 'content')  # pylint: disable=protected-access
 
         self.assertEqual(
             _conn.Object(
@@ -243,13 +226,24 @@ class S3Test(TestCase):
             'content'
         )
 
+    @mock_s3
+    def test_exists(self):
+        _conn = boto3.resource('s3', region_name='us-east-1')
+        _conn.create_bucket(Bucket='oclapi2-dev')
+
+        self.assertFalse(S3.exists('some/path'))
+
+        S3._upload('some/path', 'content')  # pylint: disable=protected-access
+
+        self.assertTrue(S3.exists('some/path'))
+
     @patch('core.common.services.S3._conn')
     def test_upload_public(self, client_mock):
         conn_mock = Mock()
         conn_mock.upload_fileobj = Mock(return_value='success')
         client_mock.return_value = conn_mock
 
-        self.assertEqual(S3.upload_public('some/path', 'content'), 'success')
+        self.assertEqual(S3._upload_public('some/path', 'content'), 'success')  # pylint: disable=protected-access
 
         conn_mock.upload_fileobj.assert_called_once_with(
             'content',
@@ -260,14 +254,14 @@ class S3Test(TestCase):
 
     def test_upload_file(self):
         with patch("builtins.open", mock_open(read_data="file-content")) as mock_file:
-            S3.upload = Mock(return_value=200)
+            S3._upload = Mock(return_value=200)  # pylint: disable=protected-access
             file_path = "path/to/file.ext"
             res = S3.upload_file(key=file_path, headers={'header1': 'val1'})
             self.assertEqual(res, 200)
-            S3.upload.assert_called_once_with(file_path, 'file-content', {'header1': 'val1'}, None)
+            S3._upload.assert_called_once_with(file_path, 'file-content', {'header1': 'val1'}, None)  # pylint: disable=protected-access
             mock_file.assert_called_once_with(file_path, 'r')
 
-    @patch('core.common.services.S3.upload')
+    @patch('core.common.services.S3._upload')
     def test_upload_base64(self, s3_upload_mock):
         file_content = base64.b64encode(b'file-content')
         uploaded_file_name_with_ext = S3.upload_base64(
@@ -289,7 +283,7 @@ class S3Test(TestCase):
             isinstance(mock_calls[0][1][1], ContentFile)
         )
 
-    @patch('core.common.services.S3.upload_public')
+    @patch('core.common.services.S3._upload_public')
     def test_upload_base64_public(self, s3_upload_mock):
         file_content = base64.b64encode(b'file-content')
         uploaded_file_name_with_ext = S3.upload_base64(
@@ -312,7 +306,7 @@ class S3Test(TestCase):
             isinstance(mock_calls[0][1][1], ContentFile)
         )
 
-    @patch('core.common.services.S3.upload')
+    @patch('core.common.services.S3._upload')
     def test_upload_base64_no_ext(self, s3_upload_mock):
         file_content = base64.b64encode(b'file-content')
         uploaded_file_name_with_ext = S3.upload_base64(
@@ -335,13 +329,12 @@ class S3Test(TestCase):
             isinstance(mock_calls[0][1][1], ContentFile)
         )
 
-    @unittest.skip('Failing on CI')
     @mock_s3
     def test_remove(self):
         conn = boto3.resource('s3', region_name='us-east-1')
         conn.create_bucket(Bucket='oclapi2-dev')
 
-        S3.upload('some/path', 'content')
+        S3._upload('some/path', 'content')  # pylint: disable=protected-access
         self.assertEqual(
             conn.Object(
                 'oclapi2-dev',
@@ -360,7 +353,7 @@ class S3Test(TestCase):
         _conn = boto3.resource('s3', region_name='us-east-1')
         _conn.create_bucket(Bucket='oclapi2-dev')
 
-        S3.upload('some/path', 'content')
+        S3._upload('some/path', 'content')  # pylint: disable=protected-access
         _url = S3.url_for('some/path')
 
         self.assertTrue(
@@ -421,6 +414,18 @@ class UtilsTest(OCLTestCase):
         http_get_mock.assert_called_once_with(
             'http://flower:5555/some-url',
             auth=HTTPBasicAuth(settings.FLOWER_USER, settings.FLOWER_PASSWORD)
+        )
+
+    @patch('core.common.utils.requests.get')
+    def test_api_get(self, http_get_mock):
+        user = UserProfileFactory()
+        http_get_mock.return_value = Mock(json=Mock(return_value='api-response'))
+
+        self.assertEqual(api_get('/some-url', user), 'api-response')
+
+        http_get_mock.assert_called_once_with(
+            'http://localhost:8000/some-url',
+            headers=dict(Authorization=f'Token {user.get_token()}')
         )
 
     @patch('core.common.utils.requests.get')
@@ -576,6 +581,18 @@ class UtilsTest(OCLTestCase):
             separate_version("/orgs/org/collections/coll/concepts/concept/"),
             (None, "/orgs/org/collections/coll/concepts/concept/")
         )
+        self.assertEqual(
+            separate_version("/orgs/org/collections/coll/123/"),
+            ("123", "/orgs/org/collections/coll/")
+        )
+        self.assertEqual(
+            separate_version("/orgs/org/sources/source/HEAD/"),
+            ("HEAD", "/orgs/org/sources/source/")
+        )
+        self.assertEqual(
+            separate_version("/orgs/org/sources/source/"),
+            (None, "/orgs/org/sources/source/")
+        )
 
     def test_to_parent_uri(self):
         self.assertEqual(
@@ -613,6 +630,10 @@ class UtilsTest(OCLTestCase):
         self.assertEqual(
             to_parent_uri("https://foobar.com/users/user/sources/source/mappings/mapping1/v1/"),
             "https://foobar.com/users/user/sources/source/"
+        )
+        self.assertEqual(
+            to_parent_uri("/concepts/"),
+            "/"
         )
 
     def test_jsonify_safe(self):
@@ -760,6 +781,32 @@ class UtilsTest(OCLTestCase):
             [1, 'foobar', 1, 'foobar', [{'a': 1}, {'b': 'foobar'}]]
         )
 
+    def test_chunks(self):
+        self.assertEqual(list(chunks([], 1000)), [])
+        self.assertEqual(list(chunks([1, 2, 3, 4], 3)), [[1, 2, 3], [4]])
+        self.assertEqual(list(chunks([1, 2, 3, 4], 2)), [[1, 2], [3, 4]])
+        self.assertEqual(list(chunks([1, 2, 3, 4], 7)), [[1, 2, 3, 4]])
+        self.assertEqual(list(chunks([1, 2, 3, 4], 4)), [[1, 2, 3, 4]])
+
+    def test_split_list_by_condition(self):
+        even, odd = split_list_by_condition([2, 3, 4, 5, 6, 7], lambda x: x % 2 == 0)
+        self.assertEqual(even, [2, 4, 6])
+        self.assertEqual(odd, [3, 5, 7])
+
+        even, odd = split_list_by_condition([3, 5, 7], lambda num: num % 2 == 0)
+        self.assertEqual(even, [])
+        self.assertEqual(odd, [3, 5, 7])
+
+        ref1 = CollectionReference(id=1, include=True)
+        ref2 = CollectionReference(id=2, include=False)
+        ref3 = CollectionReference(id=3, include=False)
+        ref4 = CollectionReference(id=3, include=True)
+
+        include, exclude = split_list_by_condition([ref1, ref2, ref3, ref4], lambda ref: ref.include)
+
+        self.assertEqual(include, [ref1, ref4])
+        self.assertEqual(exclude, [ref2, ref3])
+
 
 class BaseModelTest(OCLTestCase):
     def test_model_name(self):
@@ -769,3 +816,109 @@ class BaseModelTest(OCLTestCase):
     def test_app_name(self):
         self.assertEqual(Concept().app_name, 'concepts')
         self.assertEqual(Source().app_name, 'sources')
+
+
+class TaskTest(OCLTestCase):
+    @patch('core.common.tasks.get_export_service')
+    def test_delete_s3_objects(self, export_service_mock):
+        s3_mock = Mock(delete_objects=Mock())
+        export_service_mock.return_value = s3_mock
+        delete_s3_objects('/some/path')
+        s3_mock.delete_objects.assert_called_once_with('/some/path')
+
+    @patch('core.importers.models.BulkImportParallelRunner.run')
+    def test_bulk_import_parallel_inline_invalid_json(self, import_run_mock):
+        content = open(os.path.join(os.path.dirname(__file__), '..', 'samples/invalid_import_json.json'), 'r').read()
+
+        result = bulk_import_parallel_inline(to_import=content, username='ocladmin', update_if_exists=False)  # pylint: disable=no-value-for-parameter
+
+        self.assertEqual(result, dict(error='Invalid JSON (Expecting property name enclosed in double quotes)'))
+        import_run_mock.assert_not_called()
+
+    @patch('core.importers.models.BulkImportParallelRunner.run')
+    def test_bulk_import_parallel_inline_invalid_without_resource_type(self, import_run_mock):
+        content = open(
+            os.path.join(os.path.dirname(__file__), '..', 'samples/invalid_import_without_type.json'), 'r').read()
+
+        result = bulk_import_parallel_inline(to_import=content, username='ocladmin', update_if_exists=False)  # pylint: disable=no-value-for-parameter
+
+        self.assertEqual(result, dict(error='Invalid Input ("type" should be present in each line)'))
+        import_run_mock.assert_not_called()
+
+    @patch('core.importers.models.BulkImportParallelRunner.run')
+    def test_bulk_import_parallel_inline_valid_json(self, import_run_mock):
+        import_run_mock.return_value = 'Import Result'
+        content = open(os.path.join(os.path.dirname(__file__), '..', 'samples/sample_ocldev.json'), 'r').read()
+
+        result = bulk_import_parallel_inline(to_import=content, username='ocladmin', update_if_exists=False)  # pylint: disable=no-value-for-parameter
+
+        self.assertEqual(result, 'Import Result')
+        import_run_mock.assert_called_once()
+
+
+class PostgresQLTest(OCLTestCase):
+    @patch('core.common.services.connection')
+    def test_create_seq(self, db_connection_mock):
+        cursor_context_mock = Mock(execute=Mock())
+        cursor_mock = Mock()
+        cursor_mock.__enter__ = Mock(return_value=cursor_context_mock)
+        cursor_mock.__exit__ = Mock(return_value=None)
+        db_connection_mock.cursor = Mock(return_value=cursor_mock)
+
+        self.assertEqual(PostgresQL.create_seq('foobar_seq', 'sources.uri', 1, 100), None)
+
+        db_connection_mock.cursor.assert_called_once()
+        cursor_context_mock.execute.assert_called_once_with(
+            'CREATE SEQUENCE IF NOT EXISTS foobar_seq MINVALUE 1 START 100 OWNED BY sources.uri;')
+
+    @patch('core.common.services.connection')
+    def test_update_seq(self, db_connection_mock):
+        cursor_context_mock = Mock(execute=Mock())
+        cursor_mock = Mock()
+        cursor_mock.__enter__ = Mock(return_value=cursor_context_mock)
+        cursor_mock.__exit__ = Mock(return_value=None)
+        db_connection_mock.cursor = Mock(return_value=cursor_mock)
+
+        self.assertEqual(PostgresQL.update_seq('foobar_seq', 1567), None)
+
+        db_connection_mock.cursor.assert_called_once()
+        cursor_context_mock.execute.assert_called_once_with("SELECT setval('foobar_seq', 1567, true);")
+
+    @patch('core.common.services.connection')
+    def test_drop_seq(self, db_connection_mock):
+        cursor_context_mock = Mock(execute=Mock())
+        cursor_mock = Mock()
+        cursor_mock.__enter__ = Mock(return_value=cursor_context_mock)
+        cursor_mock.__exit__ = Mock(return_value=None)
+        db_connection_mock.cursor = Mock(return_value=cursor_mock)
+
+        self.assertEqual(PostgresQL.drop_seq('foobar_seq'), None)
+
+        db_connection_mock.cursor.assert_called_once()
+        cursor_context_mock.execute.assert_called_once_with("DROP SEQUENCE IF EXISTS foobar_seq;")
+
+    @patch('core.common.services.connection')
+    def test_next_value(self, db_connection_mock):
+        cursor_context_mock = Mock(execute=Mock(), fetchone=Mock(return_value=[1568]))
+        cursor_mock = Mock()
+        cursor_mock.__enter__ = Mock(return_value=cursor_context_mock)
+        cursor_mock.__exit__ = Mock(return_value=None)
+        db_connection_mock.cursor = Mock(return_value=cursor_mock)
+
+        self.assertEqual(PostgresQL.next_value('foobar_seq'), 1568)
+
+        db_connection_mock.cursor.assert_called_once()
+        cursor_context_mock.execute.assert_called_once_with("SELECT nextval('foobar_seq');")
+
+    @patch('core.common.services.connection')
+    def test_last_value(self, db_connection_mock):
+        cursor_context_mock = Mock(execute=Mock(), fetchone=Mock(return_value=[1567]))
+        cursor_mock = Mock()
+        cursor_mock.__enter__ = Mock(return_value=cursor_context_mock)
+        cursor_mock.__exit__ = Mock(return_value=None)
+        db_connection_mock.cursor = Mock(return_value=cursor_mock)
+
+        self.assertEqual(PostgresQL.last_value('foobar_seq'), 1567)
+
+        db_connection_mock.cursor.assert_called_once()
+        cursor_context_mock.execute.assert_called_once_with("SELECT last_value from foobar_seq;")

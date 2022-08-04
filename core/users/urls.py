@@ -1,4 +1,3 @@
-from django.conf.urls import url
 from django.urls import re_path, include, path
 
 from core.common.constants import NAMESPACE_PATTERN
@@ -7,8 +6,8 @@ from . import views
 
 urlpatterns = [
     re_path(r'^$', views.UserListView.as_view(), name='userprofile-list'),
-    url('login/', views.TokenAuthenticationView.as_view(), name='user-login'),
-    url('signup/', views.UserSignup.as_view(), name='user-signup'),
+    path('login/', views.TokenAuthenticationView.as_view(), name='user-login'),
+    path('signup/', views.UserSignup.as_view(), name='user-signup'),
     re_path(
         r'^(?P<user>' + NAMESPACE_PATTERN + ')/$',
         views.UserDetailView.as_view(),
@@ -65,6 +64,11 @@ urlpatterns = [
         name='user-extra'
     ),
     re_path(r'^(?P<user>' + NAMESPACE_PATTERN + ')/sources/', include('core.sources.urls')),
+    #TODO: require FHIR subdomain
+    re_path(r'^(?P<user>' + NAMESPACE_PATTERN + ')/CodeSystem/', include('core.code_systems.urls'),
+            name='code_systems_urls'),
+    re_path(r'^(?P<user>' + NAMESPACE_PATTERN + ')/ValueSet/', include('core.value_sets.urls'),
+            name='value_sets_urls'),
     re_path(r'^(?P<user>' + NAMESPACE_PATTERN + ')/collections/', include('core.collections.urls')),
     re_path(r'^(?P<user>' + NAMESPACE_PATTERN + ')/pins/', include('core.pins.urls')),
 ]

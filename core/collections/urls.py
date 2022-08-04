@@ -2,10 +2,26 @@ from django.urls import re_path, path
 
 from core.collections.feeds import CollectionFeed
 from core.common.constants import NAMESPACE_PATTERN
+from core.concepts.views import ConceptCascadeView
 from . import views
 
 urlpatterns = [
     re_path(r'^$', views.CollectionListView.as_view(), name='collection-list'),
+    re_path(
+        'references/old-to-new/',
+        views.CollectionReferencesOldToNewStructureMigrationView.as_view(),
+        name='collection-references-old-to-new'
+    ),
+    re_path(
+        'references/link-resources/',
+        views.CollectionReferencesLinkResourcesView.as_view(),
+        name='collection-references-old-to-new'
+    ),
+    re_path(
+        'expansions/link-repo-versions/',
+        views.ExpansionsLinkToRepoVersionsView.as_view(),
+        name='expansion-link-repo-version'
+    ),
     re_path(
         fr"^(?P<collection>{NAMESPACE_PATTERN})/$",
         views.CollectionRetrieveUpdateDestroyView.as_view(),
@@ -48,6 +64,21 @@ urlpatterns = [
         name='collectionversion-latest-export-detail'
     ),
     path(
+        "<str:collection>/concepts/<str:concept>/mappings/",
+        views.CollectionVersionConceptMappingsView.as_view(),
+        name='concept-mappings'
+    ),
+    path(
+        "<str:collection>/concepts/<str:concept>/<str:concept_version>/mappings/",
+        views.CollectionVersionConceptMappingsView.as_view(),
+        name='concept-version-mappings'
+    ),
+    path(
+        "<str:collection>/concepts/<str:concept>/$cascade/",
+        ConceptCascadeView.as_view(),
+        name='concept-cascade'
+    ),
+    path(
         "<str:collection>/concepts/<str:concept>/<str:concept_version>/",
         views.CollectionVersionConceptRetrieveView.as_view(),
         name='concept-version-detail'
@@ -88,6 +119,16 @@ urlpatterns = [
         name='collection-reference'
     ),
     re_path(
+        r'^(?P<collection>{pattern})/references/(?P<reference>{pattern})/concepts/$'.format(pattern=NAMESPACE_PATTERN),
+        views.CollectionReferenceConceptsView.as_view(),
+        name='collection-reference-concepts-list'
+    ),
+    re_path(
+        r'^(?P<collection>{pattern})/references/(?P<reference>{pattern})/mappings/$'.format(pattern=NAMESPACE_PATTERN),
+        views.CollectionReferenceMappingsView.as_view(),
+        name='collection-reference-mappings-list'
+    ),
+    re_path(
         fr"^(?P<collection>{NAMESPACE_PATTERN})/extras/$",
         views.CollectionExtrasView.as_view(),
         name='collection-extras'
@@ -112,6 +153,51 @@ urlpatterns = [
             pattern=NAMESPACE_PATTERN),
         views.CollectionVersionExpansionView.as_view(),
         name='collection-version-expansion-detail'
+    ),
+    path(
+        "<str:collection>/<str:version>/expansions/<str:expansion>/concepts/<str:concept>/mappings/",
+        views.CollectionVersionExpansionConceptMappingsView.as_view(),
+        name='concept-mappings'
+    ),
+    path(
+        "<str:collection>/<str:version>/expansions/<str:expansion>/concepts/<str:concept>/<str:concept_version>/mappings/",  # pylint: disable=line-too-long
+        views.CollectionVersionExpansionConceptMappingsView.as_view(),
+        name='concept-version-mappings'
+    ),
+    path(
+        "<str:collection>/<str:version>/expansions/<str:expansion>/concepts/<str:concept>/$cascade/",
+        ConceptCascadeView.as_view(),
+        name='concept-cascade'
+    ),
+    path(
+        "<str:collection>/<str:version>/expansions/<str:expansion>/concepts/index/",
+        views.ExpansionConceptsIndexView.as_view(),
+        name='expansion-concepts-index'
+    ),
+    path(
+        "<str:collection>/<str:version>/expansions/<str:expansion>/concepts/<str:concept>/<str:concept_version>/",
+        views.CollectionVersionExpansionConceptRetrieveView.as_view(),
+        name='concept-version-detail'
+    ),
+    path(
+        "<str:collection>/<str:version>/expansions/<str:expansion>/concepts/<str:concept>/",
+        views.CollectionVersionExpansionConceptRetrieveView.as_view(),
+        name='concept-detail'
+    ),
+    path(
+        "<str:collection>/<str:version>/expansions/<str:expansion>/mappings/<str:mapping>/<str:mapping_version>/",
+        views.CollectionVersionExpansionMappingRetrieveView.as_view(),
+        name='mapping-version-detail'
+    ),
+    path(
+        "<str:collection>/<str:version>/expansions/<str:expansion>/mappings/index/",
+        views.ExpansionMappingsIndexView.as_view(),
+        name='expansion-mappings-index'
+    ),
+    path(
+        "<str:collection>/<str:version>/expansions/<str:expansion>/mappings/<str:mapping>/",
+        views.CollectionVersionExpansionMappingRetrieveView.as_view(),
+        name='mapping-detail'
     ),
     re_path(
         r'^(?P<collection>{pattern})/(?P<version>{pattern})/expansions/(?P<expansion>{pattern})/concepts/$'.format(
@@ -147,6 +233,21 @@ urlpatterns = [
         name='collectionversion-extra'
     ),
     path(
+        "<str:collection>/<str:version>/concepts/<str:concept>/$cascade/",
+        ConceptCascadeView.as_view(),
+        name='concept-$cascade'
+    ),
+    path(
+        "<str:collection>/<str:version>/concepts/<str:concept>/<str:concept_version>/mappings/",
+        views.CollectionVersionConceptMappingsView.as_view(),
+        name='concept-version-mappings'
+    ),
+    path(
+        "<str:collection>/<str:version>/concepts/<str:concept>/mappings/",
+        views.CollectionVersionConceptMappingsView.as_view(),
+        name='concept-mappings'
+    ),
+    path(
         "<str:collection>/<str:version>/concepts/<str:concept>/<str:concept_version>/",
         views.CollectionVersionConceptRetrieveView.as_view(),
         name='concept-version-detail'
@@ -179,6 +280,35 @@ urlpatterns = [
         ),
         views.CollectionVersionMappingsView.as_view(),
         name='mapping-list'
+    ),
+    re_path(
+        r'^(?P<collection>{pattern})/(?P<version>{pattern})/references/link/$'.format(pattern=NAMESPACE_PATTERN),
+        views.CollectionVersionReferencesLinkView.as_view(),
+        name='collectionversion-references-link'
+    ),
+    re_path(
+        r'^(?P<collection>{pattern})/(?P<version>{pattern})/references/(?P<reference>{pattern})/$'.format(
+            pattern=NAMESPACE_PATTERN),
+        views.CollectionReferenceView.as_view(),
+        name='collectionversion-reference'
+    ),
+    re_path(
+        r'^(?P<collection>{pattern})/(?P<version>{pattern})/references/(?P<reference>{pattern})/resolve/$'.format(
+            pattern=NAMESPACE_PATTERN),
+        views.CollectionReferenceResolveView.as_view(),
+        name='collectionversion-reference-resolve'
+    ),
+    re_path(
+        r'^(?P<collection>{pattern})/(?P<version>{pattern})/references/(?P<reference>{pattern})/concepts/$'.format(
+            pattern=NAMESPACE_PATTERN),
+        views.CollectionReferenceConceptsView.as_view(),
+        name='collectionversion-reference-concepts-list'
+    ),
+    re_path(
+        r'^(?P<collection>{pattern})/(?P<version>{pattern})/references/(?P<reference>{pattern})/mappings/$'.format(
+            pattern=NAMESPACE_PATTERN),
+        views.CollectionReferenceMappingsView.as_view(),
+        name='collectionversion-reference-mappings-list'
     ),
     re_path(
         r'^(?P<collection>{pattern})/(?P<version>{pattern})/references/$'.format(pattern=NAMESPACE_PATTERN),

@@ -51,6 +51,9 @@ CORS_EXPOSE_HEADERS = (
     'Content-Range',
     'X-OCL-API-VERSION',
     'X-OCL-REQUEST-USER',
+    'X-OCL-RESPONSE-TIME',
+    'X-OCL-REQUEST-URL',
+    'X-OCL-REQUEST-METHOD',
 )
 
 CORS_ORIGIN_ALLOW_ALL = True
@@ -85,6 +88,7 @@ INSTALLED_APPS = [
     'core.importers',
     'core.pins',
     'core.client_configs',
+    'core.tasks',
 ]
 
 REST_FRAMEWORK = {
@@ -135,8 +139,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'request_logging.middleware.LoggingMiddleware',
     'cid.middleware.CidMiddleware',
+    'core.middlewares.middlewares.CustomLoggerMiddleware',
     'core.middlewares.middlewares.FixMalformedLimitParamMiddleware',
     'core.middlewares.middlewares.ResponseHeadersMiddleware',
     'core.middlewares.middlewares.CurrentUserMiddleware',
@@ -147,7 +151,7 @@ ROOT_URLCONF = 'core.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [os.path.join(BASE_DIR, '/core/common/templates/'), ],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -269,7 +273,7 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = '/static/'
 STATIC_ROOT = '/staticfiles'
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 
 AUTH_USER_MODEL = 'users.UserProfile'
 TEST_RUNNER = 'core.common.tests.CustomTestRunner'
@@ -286,7 +290,16 @@ API_SUPERUSER_TOKEN = os.environ.get('API_SUPERUSER_TOKEN', '891b4b17feab99f3ff7
 REDIS_PORT = os.environ.get('REDIS_PORT', 6379)
 REDIS_DB = 0
 REDIS_HOST = os.environ.get('REDIS_HOST', 'redis')
-REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}"  # needed for healthcheck
+REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}"
+
+# django cache
+if ENV and ENV not in ['ci']:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+        }
+    }
 
 # Celery
 CELERY_ENABLE_UTC = True
@@ -350,9 +363,9 @@ EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', True) in ['true', True]
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'no-reply@openconceptlab.org')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 EMAIL_PORT = os.environ.get('EMAIL_PORT', 587)
-COMMUNITY_EMAIL = 'community@openconceptlab.org'
-DEFAULT_FROM_EMAIL = 'openconceptlab <noreply@openconceptlab.org>'
-ACCOUNT_EMAIL_SUBJECT_PREFIX = '[openconceptlab.org] '
+COMMUNITY_EMAIL = os.environ.get('COMMUNITY_EMAIL', 'community@openconceptlab.org')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'openconceptlab <noreply@openconceptlab.org>')
+ACCOUNT_EMAIL_SUBJECT_PREFIX = os.environ.get('ACCOUNT_EMAIL_SUBJECT_PREFIX', '[openconceptlab.org] ')
 ADMINS = (
     ('Jonathan Payne', 'paynejd@gmail.com'),
 )
@@ -376,3 +389,4 @@ VERSION = __version__
 # Errbit
 ERRBIT_URL = os.environ.get('ERRBIT_URL', 'http://errbit:8080')
 ERRBIT_KEY = os.environ.get('ERRBIT_KEY', 'errbit-key')
+EXPORT_SERVICE = os.environ.get('EXPORT_SERVICE', 'core.common.services.S3')
