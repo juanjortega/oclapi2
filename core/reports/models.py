@@ -112,9 +112,7 @@ class ResourceReport:
         for item in queryset:
             month = item['month']
             if month:
-                result = {}
-                result[item['month'].strftime('%b %Y')] = item['total']
-                formatted.append(result)
+                formatted.append({item['month'].strftime('%b %Y'): item['total']})
 
         return formatted
 
@@ -188,7 +186,7 @@ class CollectionVersionReport(ResourceReport):
 
 
 class CollectionReferenceReport(ResourceReport):
-    queryset = CollectionReference.objects.filter(collections__version=HEAD)
+    queryset = CollectionReference.objects.filter(collection__version=HEAD)
     resource = 'collection_references'
 
 

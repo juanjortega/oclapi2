@@ -15,24 +15,31 @@ from rest_framework.generics import RetrieveUpdateDestroyAPIView
 from rest_framework.mixins import ListModelMixin, CreateModelMixin
 from rest_framework.response import Response
 
-from core.common.constants import HEAD, ACCESS_TYPE_EDIT, ACCESS_TYPE_VIEW, ACCESS_TYPE_NONE, INCLUDE_FACETS, \
+from core.common.constants import HEAD, ACCESS_TYPE_NONE, INCLUDE_FACETS, \
     LIST_DEFAULT_LIMIT, HTTP_COMPRESS_HEADER, CSV_DEFAULT_LIMIT, FACETS_ONLY, NOT_FOUND, \
-    MUST_SPECIFY_EXTRA_PARAM_IN_BODY
-from core.common.permissions import HasPrivateAccess, HasOwnership, CanViewConceptDictionary
-from core.common.services import S3
+    MUST_SPECIFY_EXTRA_PARAM_IN_BODY, INCLUDE_RETIRED_PARAM
+from core.common.permissions import HasPrivateAccess, HasOwnership, CanViewConceptDictionary, \
+    CanViewConceptDictionaryVersion
 from .utils import write_csv_to_s3, get_csv_from_s3, get_query_params_from_url_string, compact_dict_by_values, \
-    to_owner_uri
+    to_owner_uri, parse_updated_since_param, get_export_service
 
 logger = logging.getLogger('oclapi')
 
 
 class CustomPaginator:
-    def __init__(self, request, total_count, queryset, page_size):
-        self.total = total_count
+    def __init__(self, request, total_count, queryset, page_size, is_sliced=False):  # pylint: disable=too-many-arguments
         self.request = request
         self.queryset = queryset
-        self.page_size = page_size
+        self.total = total_count or self.queryset.count()
+        self.page_size = int(page_size)
         self.page_number = int(request.GET.get('page', '1') or '1')
+        if not is_sliced:
+            bottom = (self.page_number - 1) * self.page_size
+            top = bottom + self.page_size
+            if top >= self.total:
+                top = self.total
+            self.queryset = self.queryset[bottom:top]
+        self.queryset.count = None
         self.paginator = Paginator(self.queryset, self.page_size)
         self.page_object = self.paginator.get_page(self.page_number)
         self.page_count = ceil(int(self.total_count) / int(self.page_size))
@@ -47,7 +54,7 @@ class CustomPaginator:
 
     @cached_property
     def total_count(self):
-        return get(self, 'total') or self.queryset.count()
+        return self.total
 
     def __get_query_params(self):
         return self.request.GET.copy()
@@ -58,6 +65,11 @@ class CustomPaginator:
     def get_next_page_url(self):
         query_params = self.__get_query_params()
         query_params['page'] = str(self.current_page_number + 1)
+        return self.__get_full_url() + '?' + query_params.urlencode()
+
+    def get_current_page_url(self):
+        query_params = self.__get_query_params()
+        query_params['page'] = str(self.current_page_number)
         return self.__get_full_url() + '?' + query_params.urlencode()
 
     def get_previous_page_url(self):
@@ -126,25 +138,21 @@ class ListWithHeadersMixin(ListModelMixin):
         # Skip pagination if compressed results are requested
         compress = self.should_compress()
 
-        if not compress and (not self.limit or int(self.limit) == 0 or int(self.limit) > 1000):
-            self.limit = LIST_DEFAULT_LIMIT
-
         sorted_list = self.object_list
 
         headers = {}
         results = sorted_list
+        paginator = None
         if not compress:
+            if not self.limit or int(self.limit) == 0 or int(self.limit) > 1000:
+                self.limit = LIST_DEFAULT_LIMIT
             paginator = CustomPaginator(
-                request=request, queryset=sorted_list, page_size=self.limit, total_count=self.total_count
+                request=request, queryset=sorted_list, page_size=self.limit, total_count=self.total_count,
+                is_sliced=self.should_perform_es_search()
             )
             headers = paginator.headers
             results = paginator.current_page_results
-
-        result_dict = self.get_serializer(results, many=True).data
-        if self.should_include_facets():
-            data = dict(results=result_dict, facets=dict(fields=self.get_facets()))
-        else:
-            data = result_dict
+        data = self.serialize_list(results, paginator)
 
         response = Response(data)
         for key, value in headers.items():
@@ -152,6 +160,16 @@ class ListWithHeadersMixin(ListModelMixin):
         if not headers:
             response['num_found'] = len(sorted_list)
         return response
+
+    def serialize_list(self, results, paginator=None):
+        result_dict = self.get_serializer(results, many=True).data
+        if self.should_include_facets():
+            data = dict(results=result_dict, facets=dict(fields=self.get_facets()))
+        elif hasattr(self.__class__, 'bundle_response'):
+            data = self.bundle_response(result_dict, paginator)
+        else:
+            data = result_dict
+        return data
 
     def should_include_facets(self):
         return self.request.META.get(INCLUDE_FACETS, False) in ['true', True]
@@ -249,7 +267,6 @@ class SubResourceMixin(PathWalkerMixin):
     user_is_self = False
     parent_path_info = None
     parent_resource = None
-    base_or_clause = []
 
     def initialize(self, request, path_info_segment):
         self.user = request.user
@@ -271,7 +288,6 @@ class SubResourceMixin(PathWalkerMixin):
 
 
 class ConceptDictionaryMixin(SubResourceMixin):
-    base_or_clause = [Q(public_access=ACCESS_TYPE_EDIT), Q(public_access=ACCESS_TYPE_VIEW)]
     permission_classes = (HasPrivateAccess,)
 
 
@@ -308,13 +324,13 @@ class ConceptDictionaryCreateMixin(ConceptDictionaryMixin):
         if isinstance(supported_locales, str):
             supported_locales = compact(supported_locales.split(','))
 
-        serializer = self.get_serializer(
-            data={
-                'mnemonic': request.data.get('id'),
-                'supported_locales': supported_locales,
-                'version': HEAD, **request.data, **{self.parent_resource.resource_type.lower(): self.parent_resource.id}
-            }
-        )
+        data = {
+            'mnemonic': request.data.get('id'),
+            'supported_locales': supported_locales,
+            'version': HEAD, **request.data, **{self.parent_resource.resource_type.lower(): self.parent_resource.id}
+        }
+
+        serializer = self.get_serializer(data=data)
         if serializer.is_valid():
             instance = serializer.save(force_insert=True)
             if serializer.is_valid():
@@ -383,13 +399,28 @@ class SourceContainerMixin:
 
 
 class SourceChildMixin:
+    @staticmethod
+    def apply_attribute_based_filters(queryset, params):
+        is_latest = params.get('is_latest', None) in [True, 'true']
+        include_retired = params.get(INCLUDE_RETIRED_PARAM, None) in [True, 'true']
+        updated_since = parse_updated_since_param(params)
+        if is_latest:
+            queryset = queryset.filter(is_latest_version=True)
+        if not include_retired and not params.get('concept', None) and not params.get('mapping', None):
+            queryset = queryset.filter(retired=False)
+        if updated_since:
+            queryset = queryset.filter(updated_at__gte=updated_since)
+
+        return queryset
+
     @property
     def source_versions(self):
         return self.sources.exclude(version=HEAD).values_list('uri', flat=True)
 
     @property
     def collection_versions(self):
-        return self.collection_set.exclude(version=HEAD).values_list('uri', flat=True)
+        return set(self.expansion_set.exclude(
+            collection_version__version=HEAD).values_list('collection_version__uri', flat=True))
 
     @property
     def versions(self):
@@ -459,7 +490,7 @@ class SourceChildMixin:
         return self.__class__.persist_clone(new_version, user)
 
     @classmethod
-    def from_uri_queryset(cls, uri):
+    def from_uri_queryset(cls, uri):  # soon to be deleted
         queryset = cls.objects.none()
         from core.collections.utils import is_concept
         is_concept_uri = is_concept(uri)
@@ -523,21 +554,20 @@ class SourceChildMixin:
 
     @classmethod
     def get_filter_by_container_criterion(  # pylint: disable=too-many-arguments
-            cls, container_prefix, parent, org, user, container_version, is_latest_released, latest_released_version
+            cls, container_prefix, parent, org, user, container_version, is_latest_released, latest_released_version,
+            parent_attr=None
     ):
-        criteria = cls.get_exact_or_criteria(f'{container_prefix}__mnemonic', parent)
+        parent_attr = parent_attr or container_prefix
+        criteria = cls.get_exact_or_criteria(f'{parent_attr}__mnemonic', parent)
 
-        if not container_version and not is_latest_released:
-            criteria &= Q(**{f'{container_prefix}__version': HEAD})
         if user:
-            criteria &= cls.get_exact_or_criteria(f'{container_prefix}__user__username', user)
+            criteria &= Q(**{f'{parent_attr}__user__username': user})
         if org:
-            criteria &= cls.get_exact_or_criteria(f'{container_prefix}__organization__mnemonic', org)
+            criteria &= Q(**{f'{parent_attr}__organization__mnemonic': org})
         if is_latest_released:
-            criteria &= cls.get_exact_or_criteria(
-                f'{container_prefix}__version', get(latest_released_version, 'version'))
+            criteria &= Q(**{f'{container_prefix}__version': get(latest_released_version, 'version')})
         if container_version and not is_latest_released:
-            criteria &= cls.get_exact_or_criteria(f'{container_prefix}__version', container_version)
+            criteria &= Q(**{f'{container_prefix}__version': container_version})
 
         return criteria
 
@@ -555,8 +585,17 @@ class SourceChildMixin:
 
         return result
 
+    def collection_references_uris(self, collection):
+        ids = self.collection_references(collection).values_list('id', flat=True)
+        return [f"{collection.uri}references/{_id}/" for _id in ids]
+
+    def collection_references(self, collection):
+        return self.references.filter(collection=collection)
+
 
 class ConceptContainerExportMixin:
+    permission_classes = (CanViewConceptDictionaryVersion, )
+
     def get_object(self):
         queryset = self.get_queryset()
         if 'version' not in self.kwargs:
@@ -566,6 +605,8 @@ class ConceptContainerExportMixin:
 
         if not instance:
             raise Http404()
+
+        self.check_object_permissions(self.request, instance)
 
         return instance
 
@@ -636,7 +677,7 @@ class ConceptContainerExportMixin:
             return HttpResponseForbidden()
 
         if version.has_export():
-            S3.remove(version.export_path)
+            get_export_service().remove(version.export_path)
             return Response(status=status.HTTP_204_NO_CONTENT)
 
         return Response(status=status.HTTP_404_NOT_FOUND)

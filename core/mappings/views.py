@@ -9,7 +9,7 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
 from core.common.constants import HEAD, ACCESS_TYPE_NONE
-from core.common.exceptions import Http409
+from core.common.exceptions import Http400
 from core.common.mixins import ListWithHeadersMixin, ConceptDictionaryMixin
 from core.common.swagger_parameters import (
     q_param, limit_param, sort_desc_param, page_param, exact_match_param, sort_asc_param, verbose_param,
@@ -60,19 +60,26 @@ class MappingListView(MappingBaseView, ListWithHeadersMixin, CreateModelMixin):
     def get_queryset(self):
         is_latest_version = 'collection' not in self.kwargs and 'version' not in self.kwargs or \
                             get(self.kwargs, 'version') == HEAD
-        queryset = super().get_queryset()
+        parent = get(self, 'parent_resource')
+        if parent:
+            queryset = parent.mappings_set if parent.is_head else parent.mappings
+            queryset = Mapping.apply_attribute_based_filters(queryset, self.params).filter(is_active=True)
+        else:
+            queryset = super().get_queryset()
+
         if is_latest_version:
             queryset = queryset.filter(id=F('versioned_object_id'))
 
-        user = self.request.user
-        if get(user, 'is_anonymous'):
-            queryset = queryset.exclude(public_access=ACCESS_TYPE_NONE)
-        elif not get(user, 'is_staff'):
-            public_queryset = queryset.exclude(public_access=ACCESS_TYPE_NONE)
-            private_queryset = queryset.filter(public_access=ACCESS_TYPE_NONE)
-            private_queryset = private_queryset.filter(
-                Q(parent__user_id=user.id) | Q(parent__organization__members__id=user.id))
-            queryset = public_queryset.union(private_queryset)
+        if not parent:
+            user = self.request.user
+            if get(user, 'is_anonymous'):
+                queryset = queryset.exclude(public_access=ACCESS_TYPE_NONE)
+            elif not get(user, 'is_staff'):
+                public_queryset = queryset.exclude(public_access=ACCESS_TYPE_NONE)
+                private_queryset = queryset.filter(public_access=ACCESS_TYPE_NONE)
+                private_queryset = private_queryset.filter(
+                    Q(parent__user_id=user.id) | Q(parent__organization__members__id=user.id))
+                queryset = public_queryset.union(private_queryset)
 
         return queryset
 
@@ -112,6 +119,8 @@ class MappingListView(MappingBaseView, ListWithHeadersMixin, CreateModelMixin):
         if not self.parent_resource:
             raise Http404()
         data = request.data.dict() if isinstance(request.data, QueryDict) else request.data
+        if isinstance(data, list):
+            raise Http400()
         serializer = self.get_serializer(data={
             **data, 'parent_id': self.parent_resource.id
         })
@@ -126,20 +135,14 @@ class MappingListView(MappingBaseView, ListWithHeadersMixin, CreateModelMixin):
 class MappingRetrieveUpdateDestroyView(MappingBaseView, RetrieveAPIView, UpdateAPIView, DestroyAPIView):
     serializer_class = MappingDetailSerializer
 
+    def is_container_version_specified(self):
+        return 'version' in self.kwargs
+
     def get_object(self, queryset=None):
         queryset = self.get_queryset()
-        filters = dict(id=F('versioned_object_id'))
-        if 'collection' in self.kwargs:
-            filters = {}
-            queryset = queryset.order_by('id').distinct('id')
-            uri_param = self.request.query_params.dict().get('uri')
-            if uri_param:
-                filters.update(Mapping.get_parent_and_owner_filters_from_uri(uri_param))
-            if queryset.count() > 1 and not uri_param:
-                raise Http409()
-
-        instance = queryset.filter(**filters).first()
-
+        if not self.is_container_version_specified():
+            queryset = queryset.filter(id=F('versioned_object_id'))
+        instance = queryset.first()
         if not instance:
             raise Http404()
 
@@ -157,6 +160,9 @@ class MappingRetrieveUpdateDestroyView(MappingBaseView, RetrieveAPIView, UpdateA
         return [CanEditParentDictionary(), ]
 
     def update(self, request, *args, **kwargs):
+        if self.is_container_version_specified():
+            return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
         partial = kwargs.pop('partial', True)
         self.object = self.get_object()
         self.parent_resource = self.object.parent
@@ -178,6 +184,9 @@ class MappingRetrieveUpdateDestroyView(MappingBaseView, RetrieveAPIView, UpdateA
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def destroy(self, request, *args, **kwargs):
+        if self.is_container_version_specified():
+            return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
         mapping = self.get_object()
         parent = mapping.parent
         comment = request.data.get('update_comment', None) or request.data.get('comment', None)
@@ -202,10 +211,9 @@ class MappingCollectionMembershipView(MappingBaseView, ListWithHeadersMixin):
 
     def get_object(self, queryset=None):
         queryset = Mapping.get_base_queryset(self.params)
-        if 'mapping_version' in self.kwargs:
-            instance = queryset.first()
-        else:
-            instance = queryset.filter(id=F('versioned_object_id')).first().get_latest_version()
+        if 'mapping_version' not in self.kwargs:
+            queryset = queryset.filter(id=F('versioned_object_id'))
+        instance = queryset.first()
 
         if not instance:
             raise Http404()
@@ -217,8 +225,11 @@ class MappingCollectionMembershipView(MappingBaseView, ListWithHeadersMixin):
     def get_queryset(self):
         instance = self.get_object()
 
-        return instance.collection_set.filter(
-            organization_id=instance.parent.organization_id, user_id=instance.parent.user_id)
+        from core.collections.models import Collection
+        return Collection.objects.filter(id__in=instance.expansion_set.filter(
+            collection_version__organization_id=instance.parent.organization_id,
+            collection_version__user_id=instance.parent.user_id
+        ).values_list('collection_version_id', flat=True))
 
     def get(self, request, *args, **kwargs):
         return self.list(request, *args, **kwargs)
@@ -226,6 +237,7 @@ class MappingCollectionMembershipView(MappingBaseView, ListWithHeadersMixin):
 
 class MappingReactivateView(MappingBaseView, UpdateAPIView):
     serializer_class = MappingDetailSerializer
+    permission_classes = (CanEditParentDictionary, )
 
     def get_object(self, queryset=None):
         instance = self.get_queryset().filter(id=F('versioned_object_id')).first()
@@ -233,12 +245,6 @@ class MappingReactivateView(MappingBaseView, UpdateAPIView):
             raise Http404()
         self.check_object_permissions(self.request, instance)
         return instance
-
-    def get_permissions(self):
-        if self.request.method in ['GET']:
-            return [CanViewParentDictionary(), ]
-
-        return [CanEditParentDictionary(), ]
 
     def update(self, request, *args, **kwargs):
         mapping = self.get_object()
@@ -257,12 +263,12 @@ class MappingVersionsView(MappingBaseView, ConceptDictionaryMixin, ListWithHeade
     permission_classes = (CanViewParentDictionary,)
 
     def get_queryset(self):
-        queryset = super().get_queryset()
-        instance = queryset.first()
-
+        instance = super().get_queryset().filter(id=F('versioned_object_id')).first()
+        if not instance:
+            raise Http404()
         self.check_object_permissions(self.request, instance)
 
-        return queryset.exclude(id=F('versioned_object_id'))
+        return instance.versions
 
     def get_serializer_class(self):
         return MappingVersionDetailSerializer if self.is_verbose() else MappingVersionListSerializer
@@ -311,7 +317,7 @@ class MappingExtraRetrieveUpdateDestroyView(SourceChildExtraRetrieveUpdateDestro
     model = Mapping
 
 
-class MappingDebugRetrieveDestroyView(ListAPIView):
+class MappingDebugRetrieveDestroyView(ListAPIView):  # pragma: no cover
     permission_classes = (IsAdminUser, )
     serializer_class = MappingVersionDetailSerializer
 

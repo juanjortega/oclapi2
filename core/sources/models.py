@@ -1,18 +1,22 @@
+import uuid
+
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import UniqueConstraint, F
-from django.urls import resolve
-from pydash import get, compact
+from pydash import compact
+from dirtyfields import DirtyFieldsMixin
 
-from core.common.constants import HEAD
 from core.common.models import ConceptContainerModel
-from core.common.utils import get_query_params_from_url_string
+from core.common.services import PostgresQL
+from core.common.validators import validate_non_negative
 from core.concepts.models import LocalizedText
 from core.sources.constants import SOURCE_TYPE, SOURCE_VERSION_TYPE, HIERARCHY_ROOT_MUST_BELONG_TO_SAME_SOURCE, \
-    HIERARCHY_MEANINGS
+    HIERARCHY_MEANINGS, AUTO_ID_CHOICES, AUTO_ID_SEQUENTIAL, AUTO_ID_UUID
 
 
-class Source(ConceptContainerModel):
+class Source(DirtyFieldsMixin, ConceptContainerModel):
+    DEFAULT_AUTO_ID_START_FROM = 1
+
     es_fields = {
         'source_type': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
         'mnemonic': {'sortable': True, 'filterable': True, 'exact': True},
@@ -22,7 +26,7 @@ class Source(ConceptContainerModel):
         'owner': {'sortable': True, 'filterable': True, 'facet': True, 'exact': True},
         'owner_type': {'sortable': False, 'filterable': True, 'facet': True},
         'custom_validation_schema': {'sortable': False, 'filterable': True, 'facet': True},
-        'canonical_url': {'sortable': True, 'filterable': True},
+        'canonical_url': {'sortable': True, 'filterable': True, 'exact': True},
         'experimental': {'sortable': False, 'filterable': False, 'facet': False},
         'hierarchy_meaning': {'sortable': False, 'filterable': True, 'facet': True},
         'external_id': {'sortable': False, 'filterable': True, 'facet': False, 'exact': False},
@@ -53,30 +57,71 @@ class Source(ConceptContainerModel):
     compositional = models.BooleanField(null=True, blank=True, default=None)
     version_needed = models.BooleanField(null=True, blank=True, default=None)
     hierarchy_root = models.ForeignKey('concepts.Concept', null=True, blank=True, on_delete=models.SET_NULL)
+    # auto-id
+    autoid_concept_mnemonic = models.CharField(null=True, blank=True, choices=AUTO_ID_CHOICES, max_length=10)
+    autoid_concept_external_id = models.CharField(null=True, blank=True, choices=AUTO_ID_CHOICES, max_length=10)
+    autoid_mapping_mnemonic = models.CharField(
+        null=True, blank=True, choices=AUTO_ID_CHOICES, max_length=10, default=AUTO_ID_SEQUENTIAL)
+    autoid_mapping_external_id = models.CharField(null=True, blank=True, choices=AUTO_ID_CHOICES, max_length=10)
+    autoid_concept_mnemonic_start_from = models.IntegerField(
+        default=DEFAULT_AUTO_ID_START_FROM, validators=[validate_non_negative])
+    autoid_concept_external_id_start_from = models.IntegerField(
+        default=DEFAULT_AUTO_ID_START_FROM, validators=[validate_non_negative])
+    autoid_mapping_mnemonic_start_from = models.IntegerField(
+        default=DEFAULT_AUTO_ID_START_FROM, validators=[validate_non_negative])
+    autoid_mapping_external_id_start_from = models.IntegerField(
+        default=DEFAULT_AUTO_ID_START_FROM, validators=[validate_non_negative])
 
     OBJECT_TYPE = SOURCE_TYPE
     OBJECT_VERSION_TYPE = SOURCE_VERSION_TYPE
+
+    @property
+    def is_sequential_concept_mnemonic(self):
+        return self.autoid_concept_mnemonic == AUTO_ID_SEQUENTIAL
+
+    @property
+    def is_sequential_concept_external_id(self):
+        return self.autoid_concept_external_id == AUTO_ID_SEQUENTIAL
+
+    @property
+    def is_sequential_mapping_mnemonic(self):
+        return self.autoid_mapping_mnemonic == AUTO_ID_SEQUENTIAL
+
+    @property
+    def is_sequential_mapping_external_id(self):
+        return self.autoid_mapping_external_id == AUTO_ID_SEQUENTIAL
+
+    @property
+    def concept_mnemonic_next(self):
+        return self.get_resource_next_attr_id(self.autoid_concept_mnemonic, self.concepts_mnemonic_seq_name)
+
+    @property
+    def concept_external_id_next(self):
+        return self.get_resource_next_attr_id(self.autoid_concept_external_id, self.concepts_external_id_seq_name)
+
+    @property
+    def mapping_mnemonic_next(self):
+        try:
+            return self.get_resource_next_attr_id(self.autoid_mapping_mnemonic, self.mappings_mnemonic_seq_name)
+        except:  # pylint: disable=bare-except
+            return None
+
+    @property
+    def mapping_external_id_next(self):
+        return self.get_resource_next_attr_id(self.autoid_mapping_external_id, self.mappings_external_id_seq_name)
+
+    @staticmethod
+    def get_resource_next_attr_id(attr_type, seq):
+        if attr_type == AUTO_ID_UUID:
+            return uuid.uuid4()
+        if attr_type == AUTO_ID_SEQUENTIAL:
+            return str(PostgresQL.next_value(seq))
+        return None
 
     @staticmethod
     def get_search_document():
         from core.sources.documents import SourceDocument
         return SourceDocument
-
-    @classmethod
-    def head_from_uri(cls, uri):
-        queryset = cls.objects.none()
-        if not uri:
-            return queryset
-
-        try:
-            kwargs = get(resolve(uri), 'kwargs', {})
-            query_params = get_query_params_from_url_string(uri)  # parsing query parameters
-            kwargs.update(query_params)
-            queryset = cls.get_base_queryset(kwargs).filter(version=HEAD)
-        except:  # pylint: disable=bare-except
-            pass
-
-        return queryset
 
     @classmethod
     def get_base_queryset(cls, params):
@@ -135,11 +180,12 @@ class Source(ConceptContainerModel):
         return hierarchy_root.parent_id == self.head.id
 
     def clean(self):
+        super().clean()
         if self.hierarchy_root_id and not self.is_hierarchy_root_belonging_to_self():
             raise ValidationError({'hierarchy_root': [HIERARCHY_ROOT_MUST_BELONG_TO_SAME_SOURCE]})
 
     def get_parentless_concepts(self):
-        return self.concepts_set.filter(parent_concepts__isnull=True, id=F('versioned_object_id'))
+        return self.concepts.filter(parent_concepts__isnull=True, id=F('versioned_object_id'))
 
     def hierarchy(self, offset=0, limit=100):
         from core.concepts.serializers import ConceptHierarchySerializer
@@ -206,3 +252,95 @@ class Source(ConceptContainerModel):
 
         self.batch_index(self.concepts, ConceptDocument)
         self.batch_index(self.mappings, MappingDocument)
+
+    def __get_resource_db_sequence_prefix(self):
+        return self.uri.replace('/', '_').replace('-', '_').replace('.', '_').replace('@', '_')
+
+    @property
+    def concepts_mnemonic_seq_name(self):
+        prefix = self.__get_resource_db_sequence_prefix()
+        return f"{prefix}_concepts_mnemonic_seq"
+
+    @property
+    def concepts_external_id_seq_name(self):
+        prefix = self.__get_resource_db_sequence_prefix()
+        return f"{prefix}_concepts_external_id_seq"
+
+    @property
+    def mappings_mnemonic_seq_name(self):
+        prefix = self.__get_resource_db_sequence_prefix()
+        return f"{prefix}_mappings_mnemonic_seq"
+
+    @property
+    def mappings_external_id_seq_name(self):
+        prefix = self.__get_resource_db_sequence_prefix()
+        return f"{prefix}_mappings_external_id_seq"
+
+    def save(
+        self, force_insert=False, force_update=False, using=None, update_fields=None
+    ):
+        is_new = not self.id
+        dirty_fields = self.get_dirty_fields()
+
+        super().save(force_insert=force_insert, force_update=force_update, using=using, update_fields=update_fields)
+
+        if self.id and self.is_head:
+            if is_new:
+                self.__create_sequences()
+            else:
+                self.__update_sequences(dirty_fields)
+
+    def __update_sequences(self, dirty_fields=[]):  # pylint: disable=dangerous-default-value
+        def should_update(is_seq, field, start_from):
+            return field in dirty_fields and is_seq and start_from and start_from > 0
+
+        def to_seq(start_from):
+            return int(start_from) - 1
+
+        if should_update(
+                self.is_sequential_mapping_mnemonic, 'autoid_mapping_mnemonic_start_from',
+                self.autoid_mapping_mnemonic_start_from
+        ):
+            PostgresQL.update_seq(self.mappings_mnemonic_seq_name, to_seq(self.autoid_mapping_mnemonic_start_from))
+        if should_update(
+                self.is_sequential_mapping_external_id, 'autoid_mapping_external_id_start_from',
+                self.autoid_mapping_external_id_start_from
+        ):
+            PostgresQL.update_seq(
+                self.mappings_external_id_seq_name, to_seq(self.autoid_mapping_external_id_start_from))
+        if should_update(
+                self.is_sequential_concept_mnemonic, 'autoid_concept_mnemonic_start_from',
+                self.autoid_concept_mnemonic_start_from
+        ):
+            PostgresQL.update_seq(self.concepts_mnemonic_seq_name, to_seq(self.autoid_concept_mnemonic_start_from))
+        if should_update(
+                self.is_sequential_concept_external_id, 'autoid_concept_external_id_start_from',
+                self.autoid_concept_external_id_start_from
+        ):
+            PostgresQL.update_seq(
+                self.concepts_external_id_seq_name, to_seq(self.autoid_concept_external_id_start_from))
+
+    def __create_sequences(self):
+        if self.is_sequential_concept_mnemonic:
+            PostgresQL.create_seq(
+                self.concepts_mnemonic_seq_name, 'sources.uri', 0, self.autoid_concept_mnemonic_start_from
+            )
+        if self.is_sequential_mapping_mnemonic:
+            PostgresQL.create_seq(
+                self.mappings_mnemonic_seq_name, 'sources.uri', 0, self.autoid_mapping_mnemonic_start_from
+            )
+        if self.is_sequential_concept_external_id:
+            PostgresQL.create_seq(
+                self.concepts_external_id_seq_name, 'sources.uri', 0, self.autoid_concept_external_id_start_from
+            )
+        if self.is_sequential_mapping_external_id:
+            PostgresQL.create_seq(
+                self.mappings_external_id_seq_name, 'sources.uri', 0, self.autoid_mapping_external_id_start_from
+            )
+
+    def post_delete_actions(self):
+        if self.is_head:
+            PostgresQL.drop_seq(self.concepts_mnemonic_seq_name)
+            PostgresQL.drop_seq(self.concepts_external_id_seq_name)
+            PostgresQL.drop_seq(self.mappings_mnemonic_seq_name)
+            PostgresQL.drop_seq(self.mappings_external_id_seq_name)

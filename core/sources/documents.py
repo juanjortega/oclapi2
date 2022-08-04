@@ -1,3 +1,5 @@
+import json
+
 from django_elasticsearch_dsl import Document, fields
 from django_elasticsearch_dsl.registries import registry
 from pydash import get
@@ -46,6 +48,14 @@ class SourceDocument(Document):
         ]
 
     @staticmethod
+    def get_boostable_search_attrs():
+        return dict(
+            mnemonic=dict(boost=5, lower=True, wildcard=True),
+            name=dict(boost=4, lower=True, wildcard=True),
+            canonical_url=dict(boost=3, lower=True, wildcard=True)
+        )
+
+    @staticmethod
     def prepare_locale(instance):
         return get(instance.supported_locales, [])
 
@@ -58,6 +68,8 @@ class SourceDocument(Document):
             if isinstance(value, dict):
                 value = flatten_dict(value)
 
+        if value:
+            value = json.loads(json.dumps(value).replace('-', '_'))
         return value or {}
 
     @staticmethod
@@ -66,6 +78,10 @@ class SourceDocument(Document):
 
         if instance.identifier:
             value = jsonify_safe(instance.identifier)
+            if isinstance(value, dict):
+                value = flatten_dict(value)
+            if isinstance(value, str):
+                value = dict(value=value)
 
         return value or {}
 
@@ -74,6 +90,10 @@ class SourceDocument(Document):
         value = {}
         if instance.jurisdiction:
             value = jsonify_safe(instance.jurisdiction)
+            if isinstance(value, dict):
+                value = flatten_dict(value)
+            if isinstance(value, str):
+                value = dict(value=value)
 
         return value or {}
 

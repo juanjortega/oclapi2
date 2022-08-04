@@ -13,7 +13,6 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
-from django.conf.urls import url
 from django.urls import path, include, re_path
 from drf_yasg import openapi
 from drf_yasg.views import get_schema_view
@@ -22,6 +21,7 @@ from rest_framework import permissions
 import core.concepts.views as concept_views
 import core.mappings.views as mapping_views
 from core import VERSION
+from core.collections.views import ReferenceExpressionResolveView
 from core.common.constants import NAMESPACE_PATTERN
 from core.common.utils import get_api_base_url
 from core.common.views import RootView, FeedbackView, APIVersionView, ChangeLogView, ConceptDuplicateLocalesView, \
@@ -46,9 +46,9 @@ urlpatterns = [
     path('version/', APIVersionView.as_view(), name='api-version'),
     path('changelog/', ChangeLogView.as_view(), name='changelog'),
     path('feedback/', FeedbackView.as_view(), name='feedback'),
-    url(r'^swagger(?P<format>\.json|\.yaml)$', SchemaView.without_ui(cache_timeout=0), name='schema-json'),
-    url(r'^swagger/$', SchemaView.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
-    url(r'^redoc/$', SchemaView.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
+    re_path(r'^swagger(?P<format>\.json|\.yaml)$', SchemaView.without_ui(cache_timeout=0), name='schema-json'),
+    re_path(r'^swagger/$', SchemaView.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
+    re_path(r'^redoc/$', SchemaView.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
     path('healthcheck/', include('core.common.healthcheck.urls')),
     path('admin/reports/authored/', report_views.AuthoredView.as_view(), name='authored-report'),
     path('admin/reports/monthly-usage/', report_views.MonthlyUsageView.as_view(), name='monthly-usage-report'),
@@ -60,16 +60,21 @@ urlpatterns = [
         ConceptMultipleLatestVersionsView.as_view(), name='concepts-duplicate-latest-versions'),
     path('admin/mappings/debug/', mapping_views.MappingDebugRetrieveDestroyView.as_view(), name='mapping-debug'),
     path('admin/concepts/debug/<int:id>/', concept_views.ConceptDebugView.as_view(), name='concept-debug'),
+    path('$resolveReference/', ReferenceExpressionResolveView.as_view(), name='reference-$resolve'),
     path('users/', include('core.users.urls'), name='users_urls'),
     path('user/', include('core.users.user_urls'), name='current_user_urls'),
     path('orgs/', include('core.orgs.urls'), name='orgs_url'),
     path('sources/', include('core.sources.urls'), name='sources_url'),
+    #TODO: require FHIR subdomain
+    path('fhir/CodeSystem/', include('core.code_systems.urls'), name='code_systems_urls'),
+    path('fhir/ValueSet/', include('core.value_sets.urls'), name='value_sets_urls'),
     path('collections/', include('core.collections.urls'), name='collections_urls'),
     path('concepts/', concept_views.ConceptListView.as_view(), name='all_concepts_urls'),
     path('mappings/', mapping_views.MappingListView.as_view(), name='all_mappings_urls'),
     path('importers/', include('core.importers.urls'), name='importer_urls'),
     path('indexes/', include('core.indexes.urls'), name='indexes_urls'),
     path('client-configs/', include('core.client_configs.urls'), name='client_config_urls'),
+    path('tasks/', include('core.tasks.urls'), name='task_urls'),
 
     # just for ocldev
     re_path(
@@ -77,5 +82,5 @@ urlpatterns = [
         BulkImportView.as_view(),
         name='bulk_import_detail_url'
     ),
-    url('manage/bulkimport/', BulkImportView.as_view(), name='bulk_import_urls'),
+    path('manage/bulkimport/', BulkImportView.as_view(), name='bulk_import_urls'),
 ]

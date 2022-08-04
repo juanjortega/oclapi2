@@ -3,13 +3,22 @@ from django.core.exceptions import ValidationError
 from django.db import transaction, IntegrityError
 from mock import patch, Mock, ANY, PropertyMock
 
+from core.collections.models import Collection
+from core.collections.tests.factories import OrganizationCollectionFactory
 from core.common.constants import HEAD, ACCESS_TYPE_EDIT, ACCESS_TYPE_NONE, ACCESS_TYPE_VIEW, \
     CUSTOM_VALIDATION_SCHEMA_OPENMRS
+from core.common.tasks import index_source_mappings, index_source_concepts
 from core.common.tasks import seed_children_to_new_version
+from core.common.tasks import update_source_active_concepts_count
+from core.common.tasks import update_source_active_mappings_count
+from core.common.tasks import update_validation_schema
 from core.common.tests import OCLTestCase
+from core.concepts.documents import ConceptDocument
 from core.concepts.models import Concept
 from core.concepts.tests.factories import ConceptFactory, LocalizedTextFactory
+from core.mappings.documents import MappingDocument
 from core.mappings.tests.factories import MappingFactory
+from core.orgs.tests.factories import OrganizationFactory
 from core.sources.documents import SourceDocument
 from core.sources.models import Source
 from core.sources.tests.factories import OrganizationSourceFactory, UserSourceFactory
@@ -363,15 +372,6 @@ class SourceTest(OCLTestCase):
     def test_get_search_document(self):
         self.assertEqual(Source.get_search_document(), SourceDocument)
 
-    def test_head_from_uri(self):
-        source = OrganizationSourceFactory(version='HEAD')
-        self.assertEqual(Source.head_from_uri('').count(), 0)
-        self.assertEqual(Source.head_from_uri('foobar').count(), 0)
-
-        queryset = Source.head_from_uri(source.uri)
-        self.assertEqual(queryset.count(), 1)
-        self.assertEqual(queryset.first(), source)
-
     def test_released_versions(self):
         source = OrganizationSourceFactory()
         source_v1 = OrganizationSourceFactory(mnemonic=source.mnemonic, organization=source.organization, version='v1')
@@ -606,6 +606,169 @@ class SourceTest(OCLTestCase):
         self.assertTrue(source.is_hierarchy_root_belonging_to_self())
         self.assertTrue(source_v1.is_hierarchy_root_belonging_to_self())
 
+    def test_resolve_reference_expression_non_existing(self):
+        resolved_source_version = Source.resolve_reference_expression('/some/url/')
+        self.assertIsNone(resolved_source_version.id)
+        self.assertFalse(resolved_source_version.is_fqdn)
+
+        resolved_source_version = Source.resolve_reference_expression('/some/url/', namespace='/orgs/foo/')
+        self.assertIsNone(resolved_source_version.id)
+        self.assertFalse(resolved_source_version.is_fqdn)
+
+        resolved_source_version = Source.resolve_reference_expression('https://some/url/')
+        self.assertIsNone(resolved_source_version.id)
+        self.assertEqual(resolved_source_version.version, '')
+        self.assertTrue(resolved_source_version.is_fqdn)
+
+        resolved_source_version = Source.resolve_reference_expression(
+            'https://some/url/', namespace='/orgs/foo/')
+        self.assertIsNone(resolved_source_version.id)
+        self.assertTrue(resolved_source_version.is_fqdn)
+        self.assertTrue(isinstance(resolved_source_version, Source))
+
+        org = OrganizationFactory(mnemonic='org')
+        OrganizationSourceFactory(
+            mnemonic='source', canonical_url='https://source.org.com', organization=org)
+        OrganizationSourceFactory(
+            mnemonic='source', canonical_url='https://source.org.com', organization=org, version='v1.0')
+
+        resolved_source_version = Source.resolve_reference_expression('https://source.org.com|v2.0')
+        self.assertIsNone(resolved_source_version.id)
+        self.assertTrue(resolved_source_version.is_fqdn)
+
+        resolved_source_version = Source.resolve_reference_expression('https://source.org.com', version='2.0')
+        self.assertIsNone(resolved_source_version.id)
+        self.assertTrue(resolved_source_version.is_fqdn)
+
+        resolved_source_version = Source.resolve_reference_expression('https://source.org.com', version='2.0')
+        self.assertIsNone(resolved_source_version.id)
+        self.assertTrue(resolved_source_version.is_fqdn)
+
+    def test_resolve_reference_expression_existing(self):  # pylint: disable=too-many-statements
+        org = OrganizationFactory(mnemonic='org')
+        OrganizationSourceFactory(
+            id=1, mnemonic='source', canonical_url='https://source.org.com', organization=org)
+        OrganizationSourceFactory(
+            id=2, mnemonic='source', canonical_url='https://source.org.com', organization=org, version='v1.0',
+            released=True
+        )
+        OrganizationSourceFactory(
+            id=3, mnemonic='source', canonical_url='https://source.org.com', organization=org, version='v2.0',
+            released=True
+        )
+        OrganizationSourceFactory(id=4, mnemonic='source', organization=org, version='v3.0',)
+        OrganizationCollectionFactory(id=5, mnemonic='collection', organization=org)
+        OrganizationCollectionFactory(id=6, mnemonic='collection', organization=org, version='v1.0', released=True)
+        OrganizationCollectionFactory(id=7, mnemonic='collection', organization=org, version='v2.0')
+
+        OrganizationCollectionFactory(id=8, mnemonic='collection2', organization=org)
+        OrganizationCollectionFactory(id=9, mnemonic='collection2', organization=org, version='v1.0', released=False)
+
+        resolved_version = Source.resolve_reference_expression(
+            '/orgs/org/sources/source/', version="v1.0")
+        self.assertEqual(resolved_version.id, 2)
+        self.assertTrue(isinstance(resolved_version, Source))
+        self.assertEqual(resolved_version.version, 'v1.0')
+        self.assertEqual(resolved_version.canonical_url, 'https://source.org.com')
+        self.assertFalse(resolved_version.is_fqdn)
+
+        resolved_version = Source.resolve_reference_expression('/orgs/org/sources/source/')
+        self.assertEqual(resolved_version.id, 3)
+        self.assertTrue(isinstance(resolved_version, Source))
+        self.assertEqual(resolved_version.version, 'v2.0')
+        self.assertEqual(resolved_version.canonical_url, 'https://source.org.com')
+        self.assertFalse(resolved_version.is_fqdn)
+
+        resolved_version = Source.resolve_reference_expression(
+            '/orgs/org/sources/source/', namespace='/orgs/org/')
+        self.assertEqual(resolved_version.id, 3)
+        self.assertTrue(isinstance(resolved_version, Source))
+        self.assertEqual(resolved_version.version, 'v2.0')
+        self.assertEqual(resolved_version.canonical_url, 'https://source.org.com')
+        self.assertFalse(resolved_version.is_fqdn)
+
+        resolved_version = Source.resolve_reference_expression(
+            '/orgs/org/sources/source/v1.0/', namespace='/orgs/org/')
+        self.assertEqual(resolved_version.id, 2)
+        self.assertTrue(isinstance(resolved_version, Source))
+        self.assertEqual(resolved_version.version, 'v1.0')
+        self.assertEqual(resolved_version.canonical_url, 'https://source.org.com')
+        self.assertFalse(resolved_version.is_fqdn)
+
+        resolved_version = Source.resolve_reference_expression(
+            'https://source.org.com', version="v3.0")
+        self.assertEqual(resolved_version.id, 4)
+        self.assertTrue(isinstance(resolved_version, Source))
+        self.assertEqual(resolved_version.version, 'v3.0')
+        self.assertEqual(resolved_version.canonical_url, 'https://source.org.com')
+        self.assertTrue(resolved_version.is_fqdn)
+
+        resolved_version = Source.resolve_reference_expression('https://source.org.com')
+        self.assertEqual(resolved_version.id, 3)
+        self.assertTrue(isinstance(resolved_version, Source))
+        self.assertEqual(resolved_version.version, 'v2.0')
+        self.assertEqual(resolved_version.canonical_url, 'https://source.org.com')
+        self.assertTrue(resolved_version.is_fqdn)
+
+        resolved_version = Source.resolve_reference_expression(
+            'https://source.org.com|v1.0', namespace='/orgs/org/')
+        self.assertEqual(resolved_version.id, 2)
+        self.assertTrue(isinstance(resolved_version, Source))
+        self.assertEqual(resolved_version.version, 'v1.0')
+        self.assertEqual(resolved_version.canonical_url, 'https://source.org.com')
+        self.assertTrue(resolved_version.is_fqdn)
+
+        resolved_version = Source.resolve_reference_expression(
+            '/orgs/org/collections/collection/concepts/?q=foobar', namespace='/orgs/org/')
+        self.assertEqual(resolved_version.id, 6)
+        self.assertTrue(isinstance(resolved_version, Collection))
+        self.assertEqual(resolved_version.version, 'v1.0')
+        self.assertEqual(resolved_version.canonical_url, None)
+        self.assertFalse(resolved_version.is_fqdn)
+
+        resolved_version = Source.resolve_reference_expression(
+            '/orgs/org/collections/collection/concepts/123/', namespace='/orgs/org/', version='v2.0')
+        self.assertEqual(resolved_version.id, 7)
+        self.assertTrue(isinstance(resolved_version, Collection))
+        self.assertEqual(resolved_version.version, 'v2.0')
+        self.assertEqual(resolved_version.canonical_url, None)
+        self.assertFalse(resolved_version.is_fqdn)
+
+        resolved_version = Source.resolve_reference_expression(
+            '/orgs/org/collections/collection2/', namespace='/orgs/org/')
+        self.assertEqual(resolved_version.id, 8)
+        self.assertTrue(isinstance(resolved_version, Collection))
+        self.assertEqual(resolved_version.version, 'HEAD')
+        self.assertEqual(resolved_version.canonical_url, None)
+        self.assertFalse(resolved_version.is_fqdn)
+
+    @patch('core.mappings.documents.MappingDocument.update')
+    @patch('core.concepts.documents.ConceptDocument.update')
+    def test_index_children(self, concept_document_update, mapping_document_update):
+        source = OrganizationSourceFactory()
+        concept1 = ConceptFactory(parent=source)
+        concept2 = ConceptFactory(parent=source)
+        MappingFactory(parent=source, from_concept=concept1, to_concept=concept2)
+
+        source.index_children()
+
+        concept_document_update.assert_called_once_with(ANY, parallel=True)
+        mapping_document_update.assert_called_once_with(ANY, parallel=True)
+
+    def test_autoid_start_from_validate_non_negative(self):
+        for field in [
+            'autoid_concept_mnemonic_start_from', 'autoid_mapping_mnemonic_start_from',
+            'autoid_concept_external_id_start_from', 'autoid_mapping_external_id_start_from',
+        ]:
+            with self.assertRaises(ValidationError):
+                Source(**{field: -1}, mnemonic='foo', version='HEAD', name='foo').full_clean()
+
+        for field in [
+            'autoid_concept_mnemonic_start_from', 'autoid_mapping_mnemonic_start_from',
+            'autoid_concept_external_id_start_from', 'autoid_mapping_external_id_start_from',
+        ]:
+            Source(**{field: 1}, mnemonic='foo', version='HEAD', name='foo').full_clean()
+
 
 class TasksTest(OCLTestCase):
     @patch('core.sources.models.Source.index_children')
@@ -645,3 +808,69 @@ class TasksTest(OCLTestCase):
         self.assertEqual(source_v1.mappings.count(), 1)
         export_source_task.delay.assert_called_once_with(source_v1.id)
         index_children_mock.assert_called_once()
+
+    def test_update_source_active_mappings_count(self):
+        source = OrganizationSourceFactory()
+        MappingFactory(parent=source)
+        MappingFactory(retired=True, parent=source)
+
+        self.assertEqual(source.active_mappings, None)
+
+        update_source_active_mappings_count(source.id)
+
+        source.refresh_from_db()
+        self.assertEqual(source.active_mappings, 1)
+
+    def test_update_source_active_concepts_count(self):
+        source = OrganizationSourceFactory()
+        ConceptFactory(parent=source)
+        ConceptFactory(retired=True, parent=source)
+
+        self.assertEqual(source.active_concepts, None)
+
+        update_source_active_concepts_count(source.id)
+
+        source.refresh_from_db()
+        self.assertEqual(source.active_concepts, 1)
+
+    @patch('core.sources.models.Source.mappings')
+    @patch('core.sources.models.Source.batch_index')
+    def test_index_source_mappings(self, batch_index_mock, source_mappings_mock):
+        source = OrganizationSourceFactory()
+        index_source_mappings(source.id)
+        batch_index_mock.assert_called_once_with(source_mappings_mock, MappingDocument)
+
+    @patch('core.sources.models.Source.concepts')
+    @patch('core.sources.models.Source.batch_index')
+    def test_index_source_concepts(self, batch_index_mock, source_concepts_mock):
+        source = OrganizationSourceFactory()
+        index_source_concepts(source.id)
+        batch_index_mock.assert_called_once_with(source_concepts_mock, ConceptDocument)
+
+    @patch('core.sources.models.Source.validate_child_concepts')
+    def test_update_validation_schema_success(self, validate_child_concepts_mock):
+        validate_child_concepts_mock.return_value = None
+        source = OrganizationSourceFactory()
+
+        self.assertEqual(source.custom_validation_schema, None)
+
+        update_validation_schema('source', source.id, 'OpenMRS')
+
+        source.refresh_from_db()
+        self.assertEqual(source.custom_validation_schema, 'OpenMRS')
+        validate_child_concepts_mock.assert_called_once()
+
+    @patch('core.sources.models.Source.validate_child_concepts')
+    def test_update_validation_schema_failure(self, validate_child_concepts_mock):
+        validate_child_concepts_mock.return_value = dict(errors='Failed')
+        source = OrganizationSourceFactory()
+
+        self.assertEqual(source.custom_validation_schema, None)
+        self.assertEqual(
+            update_validation_schema('source', source.id, 'OpenMRS'),
+            {'failed_concept_validations': {'errors': 'Failed'}}
+        )
+
+        source.refresh_from_db()
+        self.assertEqual(source.custom_validation_schema, None)
+        validate_child_concepts_mock.assert_called_once()

@@ -1,10 +1,10 @@
 from pydash import get
-from rest_framework.fields import CharField, JSONField, IntegerField, DateTimeField, ListField
+from rest_framework.fields import CharField, JSONField, IntegerField, DateTimeField, ListField, SerializerMethodField
 from rest_framework.serializers import ModelSerializer
 
 from core.common.constants import MAPPING_LOOKUP_CONCEPTS, MAPPING_LOOKUP_SOURCES, MAPPING_LOOKUP_FROM_CONCEPT, \
     MAPPING_LOOKUP_TO_CONCEPT, MAPPING_LOOKUP_FROM_SOURCE, MAPPING_LOOKUP_TO_SOURCE, INCLUDE_EXTRAS_PARAM, \
-    INCLUDE_SOURCE_VERSIONS, INCLUDE_COLLECTION_VERSIONS
+    INCLUDE_SOURCE_VERSIONS, INCLUDE_COLLECTION_VERSIONS, INCLUDE_VERBOSE_REFERENCES
 from core.common.fields import EncodedDecodedCharField
 from core.concepts.serializers import ConceptListSerializer, ConceptDetailSerializer
 from core.mappings.models import Mapping
@@ -29,6 +29,7 @@ class MappingListSerializer(ModelSerializer):
     to_concept_name_resolved = CharField(source='to_concept.display_name', read_only=True)
     to_concept_code = EncodedDecodedCharField(required=False)
     from_concept_code = EncodedDecodedCharField(required=False)
+    references = SerializerMethodField()
 
     class Meta:
         model = Mapping
@@ -41,11 +42,12 @@ class MappingListSerializer(ModelSerializer):
             'url', 'version', 'id', 'versioned_object_id', 'versioned_object_url',
             'is_latest_version', 'update_comment', 'version_url', 'uuid', 'version_created_on',
             'from_source_version', 'to_source_version', 'from_concept', 'to_concept', 'from_source', 'to_source',
-            'from_concept_name_resolved', 'to_concept_name_resolved', 'extras', 'type'
+            'from_concept_name_resolved', 'to_concept_name_resolved', 'extras', 'type', 'references'
         )
 
     def __init__(self, *args, **kwargs):
-        params = get(kwargs, 'context.request.query_params')
+        request = get(kwargs, 'context.request')
+        params = get(request, 'query_params')
         self.query_params = params.dict() if params else {}
         self.include_from_source = self.query_params.get(MAPPING_LOOKUP_FROM_SOURCE) in ['true', True]
         self.include_to_source = self.query_params.get(MAPPING_LOOKUP_TO_SOURCE) in ['true', True]
@@ -53,8 +55,8 @@ class MappingListSerializer(ModelSerializer):
         self.include_from_concept = self.query_params.get(MAPPING_LOOKUP_FROM_CONCEPT) in ['true', True]
         self.include_to_concept = self.query_params.get(MAPPING_LOOKUP_TO_CONCEPT) in ['true', True]
         self.include_concepts = self.query_params.get(MAPPING_LOOKUP_CONCEPTS) in ['true', True]
-
         self.include_extras = self.query_params.get(INCLUDE_EXTRAS_PARAM) in ['true', True]
+        self.include_verbose_references = self.query_params.get(INCLUDE_VERBOSE_REFERENCES) in ['true', True]
 
         if not self.include_concepts:
             if not self.include_from_concept:
@@ -73,7 +75,19 @@ class MappingListSerializer(ModelSerializer):
         ]:
             self.fields.pop('extras', None)
 
+        if not get(request, 'instance'):
+            self.fields.pop('references', None)
+
         super().__init__(*args, **kwargs)
+
+    def get_references(self, obj):
+        collection = get(self, 'context.request.instance')
+        if collection:
+            if self.include_verbose_references:
+                from core.collections.serializers import CollectionReferenceSerializer
+                return CollectionReferenceSerializer(obj.collection_references(collection), many=True).data
+            return obj.collection_references_uris(collection)
+        return None
 
 
 class MappingVersionListSerializer(MappingListSerializer):
@@ -111,14 +125,27 @@ class MappingMinimalSerializer(ModelSerializer):
     url = CharField(source='uri', read_only=True)
     to_concept_code = EncodedDecodedCharField()
     target_concept_code = EncodedDecodedCharField(source='to_concept_code')
+    target_concept_name = SerializerMethodField()
     target_concept_url = CharField(source='to_concept_url')
+    target_source_name = CharField(source='to_source_name', allow_blank=True, allow_null=True)
+    target_source_owner = CharField(source='to_source_owner', allow_blank=True, allow_null=True)
 
     class Meta:
         model = Mapping
         fields = (
             'uuid', 'id', 'type', 'map_type', 'url', 'version_url', 'to_concept_code', 'to_concept_url',
-            'target_concept_code', 'target_concept_url'
+            'target_concept_code', 'target_concept_url', 'target_source_owner', 'target_source_name',
+            'target_concept_name', 'retired'
         )
+
+    @staticmethod
+    def get_target_concept_name(obj):
+        name = obj.to_concept_name
+        if not name and obj.parent_id != get(obj, 'to_concept.parent_id'):
+            # only returns for source different than self
+            name = get(obj, 'to_concept.display_name')
+
+        return name
 
 
 class MappingReverseMinimalSerializer(ModelSerializer):
@@ -128,14 +155,27 @@ class MappingReverseMinimalSerializer(ModelSerializer):
     url = CharField(source='uri', read_only=True)
     from_concept_code = EncodedDecodedCharField()
     target_concept_code = EncodedDecodedCharField(source='from_concept_code')
+    target_concept_name = SerializerMethodField()
     target_concept_url = CharField(source='from_concept_url')
+    target_source_name = CharField(source='from_source_name', allow_blank=True, allow_null=True)
+    target_source_owner = CharField(source='from_source_owner', allow_blank=True, allow_null=True)
 
     class Meta:
         model = Mapping
         fields = (
             'uuid', 'id', 'type', 'map_type', 'url', 'version_url', 'from_concept_code', 'from_concept_url',
-            'target_concept_code', 'target_concept_url'
+            'target_concept_code', 'target_concept_url', 'target_source_owner', 'target_source_name',
+            'target_concept_name', 'retired'
         )
+
+    @staticmethod
+    def get_target_concept_name(obj):
+        name = obj.from_concept_name
+        if not name and obj.parent_id != get(obj, 'from_concept.parent_id'):
+            # only returns for source different than self
+            name = get(obj, 'from_concept.display_name')
+
+        return name
 
 
 class MappingDetailSerializer(MappingListSerializer):

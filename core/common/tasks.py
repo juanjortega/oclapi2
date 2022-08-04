@@ -1,9 +1,11 @@
+from json import JSONDecodeError
 
 from billiard.exceptions import WorkerLostError
 from celery.utils.log import get_task_logger
 from celery_once import QueueOnce
 from django.apps import apps
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.mail import EmailMessage
 from django.core.management import call_command
 from django.template.loader import render_to_string
@@ -12,8 +14,7 @@ from pydash import get
 
 from core.celery import app
 from core.common.constants import CONFIRM_EMAIL_ADDRESS_MAIL_SUBJECT, PASSWORD_RESET_MAIL_SUBJECT
-from core.common.services import S3
-from core.common.utils import write_export_file, web_url, get_resource_class_from_resource_name
+from core.common.utils import write_export_file, web_url, get_resource_class_from_resource_name, get_export_service
 
 logger = get_task_logger(__name__)
 
@@ -117,6 +118,9 @@ def export_collection(self, version_id):
         return
 
     version.add_processing(self.request.id)
+
+    if version.expansion_uri:
+        version.expansion.wait_until_processed()
     try:
         logger.info('Found collection version %s.  Beginning export...', version.version)
         write_export_file(
@@ -128,9 +132,9 @@ def export_collection(self, version_id):
 
 
 @app.task(bind=True)
-def add_references(
-        self, user_id, data, collection_id, cascade_mappings=False, cascade_to_concepts=False
-):  # pylint: disable=too-many-arguments,too-many-locals
+def add_references(  # pylint: disable=too-many-arguments,too-many-locals
+        self, user_id, data, collection_id, cascade=False, transform_to_resource_version=False
+):
     from core.users.models import UserProfile
     from core.collections.models import Collection
     user = UserProfile.objects.get(id=user_id)
@@ -139,17 +143,23 @@ def add_references(
     head.add_processing(self.request.id)
 
     try:
-        (added_references, errors) = collection.add_expressions(data, user, cascade_mappings, cascade_to_concepts)
+        (added_references, errors) = collection.add_expressions(
+            data, user, cascade, transform_to_resource_version)
     finally:
         head.remove_processing(self.request.id)
 
     for ref in added_references:
-        if ref.concepts:
-            for concept in ref.concepts:
-                concept.index()
-        if ref.mappings:
-            for mapping in ref.mappings:
-                mapping.index()
+        if ref.concepts.exists():
+            from core.concepts.models import Concept
+            from core.concepts.documents import ConceptDocument
+            Concept.batch_index(ref.concepts, ConceptDocument)
+        if ref.mappings.exists():
+            from core.mappings.models import Mapping
+            from core.mappings.documents import MappingDocument
+            Mapping.batch_index(ref.mappings, MappingDocument)
+    if errors:
+        logger.info('Errors while adding references....')
+        logger.info(errors)
 
     return errors
 
@@ -220,10 +230,16 @@ def bulk_import(to_import, username, update_if_exists):
 @app.task(base=QueueOnce, bind=True)
 def bulk_import_parallel_inline(self, to_import, username, update_if_exists, threads=5):
     from core.importers.models import BulkImportParallelRunner
-    return BulkImportParallelRunner(
-        content=to_import, username=username, update_if_exists=update_if_exists, parallel=threads,
-        self_task_id=self.request.id
-    ).run()
+    try:
+        importer = BulkImportParallelRunner(
+            content=to_import, username=username, update_if_exists=update_if_exists,
+            parallel=threads, self_task_id=self.request.id
+        )
+    except JSONDecodeError as ex:
+        return dict(error=f"Invalid JSON ({ex.msg})")
+    except ValidationError as ex:
+        return dict(error=f"Invalid Input ({ex.message})")
+    return importer.run()
 
 
 @app.task(base=QueueOnce)
@@ -283,7 +299,7 @@ def send_user_reset_password_email(user_id):
 
 
 @app.task(bind=True)
-def seed_children_to_new_version(self, resource, obj_id, export=True):
+def seed_children_to_new_version(self, resource, obj_id, export=True, sync=False):
     instance = None
     export_task = None
     autoexpand = True
@@ -312,7 +328,7 @@ def seed_children_to_new_version(self, resource, obj_id, export=True):
                 instance.seed_concepts(index=index)
                 instance.seed_mappings(index=index)
             elif autoexpand:
-                instance.cascade_children_to_expansion(index=index)
+                instance.cascade_children_to_expansion(index=index, sync=sync)
 
             if export:
                 export_task.delay(obj_id)
@@ -328,6 +344,9 @@ def seed_children_to_expansion(expansion_id, index=True):
     expansion = Expansion.objects.filter(id=expansion_id).first()
     if expansion:
         expansion.seed_children(index=index)
+        if expansion.is_processing:
+            expansion.is_processing = False
+            expansion.save()
 
 
 @app.task
@@ -436,7 +455,7 @@ def delete_duplicate_locales(start_from=None):  # pragma: no cover
     total = queryset.count()
     batch_size = 1000
 
-    logger.info(f'{total:d} concepts with more than one locales. Getting them in batches of {batch_size:d}...')  # pylint: disable=logging-not-lazy
+    logger.info(f'{total:d} concepts with more than one locales. Getting them in batches of {batch_size:d}...')  # pylint: disable=logging-not-lazy,logging-fstring-interpolation
 
     for start in range(start_from, total, batch_size):
         end = min(start + batch_size, total)
@@ -479,22 +498,38 @@ def delete_concept(concept_id):  # pragma: no cover
     from core.concepts.models import Concept
 
     queryset = Concept.objects.filter(id=concept_id)
-    if queryset.exists():
-        queryset.delete()
+    concept = queryset.first()
+    if concept:
+        parent = concept.parent
+        concept.delete()
+        parent.update_concepts_count()
 
     return 1
 
 
-@app.task
-def batch_index_resources(resource, filters):
+@app.task(
+    ignore_result=True, autoretry_for=(Exception, WorkerLostError, ), retry_kwargs={'max_retries': 2, 'countdown': 2},
+    acks_late=True, reject_on_worker_lost=True
+)
+def batch_index_resources(resource, filters, update_indexed=False):
     model = get_resource_class_from_resource_name(resource)
     if model:
-        model.batch_index(model.objects.filter(**filters), model.get_search_document())
+        queryset = model.objects.filter(**filters)
+        model.batch_index(queryset, model.get_search_document())
+
+        from core.concepts.models import Concept
+        from core.mappings.models import Mapping
+        if model in [Concept, Mapping]:
+            if update_indexed:
+                queryset.update(_index=True)
 
     return 1
 
 
-@app.task
+@app.task(
+    ignore_result=True, autoretry_for=(Exception, WorkerLostError, ), retry_kwargs={'max_retries': 2, 'countdown': 2},
+    acks_late=True, reject_on_worker_lost=True
+)
 def index_expansion_concepts(expansion_id):
     from core.collections.models import Expansion
     expansion = Expansion.objects.filter(id=expansion_id).first()
@@ -503,7 +538,10 @@ def index_expansion_concepts(expansion_id):
         expansion.batch_index(expansion.concepts, ConceptDocument)
 
 
-@app.task
+@app.task(
+    ignore_result=True, autoretry_for=(Exception, WorkerLostError, ), retry_kwargs={'max_retries': 2, 'countdown': 2},
+    acks_late=True, reject_on_worker_lost=True
+)
 def index_expansion_mappings(expansion_id):
     from core.collections.models import Expansion
     expansion = Expansion.objects.filter(id=expansion_id).first()
@@ -535,7 +573,10 @@ def make_hierarchy(concept_map):  # pragma: no cover
             logger.info('Could not find parent %s', parent_concept_uri)
 
 
-@app.task
+@app.task(
+    ignore_result=True, autoretry_for=(Exception, WorkerLostError, ), retry_kwargs={'max_retries': 2, 'countdown': 2},
+    acks_late=True, reject_on_worker_lost=True
+)
 def index_source_concepts(source_id):
     from core.sources.models import Source
     source = Source.objects.filter(id=source_id).first()
@@ -544,7 +585,10 @@ def index_source_concepts(source_id):
         source.batch_index(source.concepts, ConceptDocument)
 
 
-@app.task
+@app.task(
+    ignore_result=True, autoretry_for=(Exception, WorkerLostError, ), retry_kwargs={'max_retries': 2, 'countdown': 2},
+    acks_late=True, reject_on_worker_lost=True
+)
 def index_source_mappings(source_id):
     from core.sources.models import Source
     source = Source.objects.filter(id=source_id).first()
@@ -600,4 +644,70 @@ def update_collection_active_mappings_count(collection_id):
 @app.task
 def delete_s3_objects(path):
     if path:
-        S3.delete_objects(path)
+        get_export_service().delete_objects(path)
+
+
+@app.task(ignore_result=True)
+def link_references_to_resources(reference_ids):  # pragma: no cover
+    from core.collections.models import CollectionReference
+    for reference in CollectionReference.objects.filter(id__in=reference_ids):
+        logger.info('Linking Reference %s', reference.uri)
+        reference.link_resources()
+
+
+@app.task(ignore_result=True)
+def link_all_references_to_resources():  # pragma: no cover
+    from core.collections.models import CollectionReference
+    queryset = CollectionReference.objects.filter(concepts__isnull=True, mappings__isnull=True)
+    total = queryset.count()
+    logger.info('Need to link %d references', total)
+    count = 1
+    for reference in queryset:
+        logger.info('(%d/%d) Linking Reference %s', count, total, reference.uri)
+        count += 1
+        reference.link_resources()
+
+
+@app.task(ignore_result=True)
+def link_expansions_repo_versions():  # pragma: no cover
+    from core.collections.models import Expansion
+    expansions = Expansion.objects.filter()
+    total = expansions.count()
+    logger.info('Total Expansions %d', total)
+    count = 1
+    for expansion in expansions:
+        if (
+                expansion.concepts.exists() or expansion.mappings.exists()
+        ) and (
+                not expansion.resolved_source_versions.exists() and not expansion.resolved_collection_versions.exists()
+        ):
+            logger.info('(%d/%d) Linking Repo Version %s', count, total, expansion.uri)
+            expansion.link_repo_versions()
+        else:
+            logger.info('(%d/%d) Skipping already Linked %s', count, total, expansion.uri)
+        count += 1
+
+
+@app.task(ignore_result=True)
+def reference_old_to_new_structure():  # pragma: no cover
+    from core.collections.parsers import CollectionReferenceExpressionStringParser
+    from core.collections.models import CollectionReference
+
+    queryset = CollectionReference.objects.filter(expression__isnull=False, system__isnull=True, valueset__isnull=True)
+    total = queryset.count()
+    logger.info('Need to migrate %d references', total)
+    count = 1
+    for reference in queryset:
+        logger.info('(%d/%d) Migrating %s', count, total, reference.uri)
+        count += 1
+        parser = CollectionReferenceExpressionStringParser(expression=reference.expression)
+        parser.parse()
+        ref_struct = parser.to_reference_structure()[0]
+        reference.reference_type = ref_struct['reference_type'] or 'concepts'
+        reference.system = ref_struct['system']
+        reference.version = ref_struct['version']
+        reference.code = ref_struct['code']
+        reference.resource_version = ref_struct['resource_version']
+        reference.valueset = ref_struct['valueset']
+        reference.filter = ref_struct['filter']
+        reference.save()

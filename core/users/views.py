@@ -19,7 +19,7 @@ from core.common.exceptions import Http400
 from core.common.mixins import ListWithHeadersMixin
 from core.common.swagger_parameters import last_login_before_param, last_login_since_param, updated_since_param, \
     date_joined_since_param, date_joined_before_param
-from core.common.utils import parse_updated_since_param, parse_updated_since
+from core.common.utils import parse_updated_since_param, from_string_to_date
 from core.common.views import BaseAPIView, BaseLogoView
 from core.orgs.models import Organization
 from core.users.constants import VERIFICATION_TOKEN_MISMATCH, VERIFY_EMAIL_MESSAGE, REACTIVATE_USER_MESSAGE
@@ -80,13 +80,13 @@ class UserBaseView(BaseAPIView):
         if updated_since:
             self.queryset = self.queryset.filter(updated_at__gte=updated_since)
         if last_login_since:
-            self.queryset = self.queryset.filter(last_login__gte=parse_updated_since(last_login_since))
+            self.queryset = self.queryset.filter(last_login__gte=from_string_to_date(last_login_since))
         if last_login_before:
-            self.queryset = self.queryset.filter(last_login__lt=parse_updated_since(last_login_before))
+            self.queryset = self.queryset.filter(last_login__lt=from_string_to_date(last_login_before))
         if date_joined_since:
-            self.queryset = self.queryset.filter(created_at__gte=parse_updated_since(date_joined_since))
+            self.queryset = self.queryset.filter(created_at__gte=from_string_to_date(date_joined_since))
         if date_joined_before:
-            self.queryset = self.queryset.filter(created_at__lt=parse_updated_since(date_joined_before))
+            self.queryset = self.queryset.filter(created_at__lt=from_string_to_date(date_joined_before))
         if not self.should_include_inactive():
             self.queryset = self.queryset.filter(is_active=True)
         return self.queryset
@@ -180,10 +180,9 @@ class UserEmailVerificationView(UserBaseView):
         if not user:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        result = user.mark_verified(kwargs.get('verification_token'))
+        result = user.mark_verified(token=kwargs.get('verification_token'), force=get(request.user, 'is_staff'))
         if result:
-            update_last_login(None, user)
-            return Response({'token': user.get_token()}, status=status.HTTP_200_OK)
+            return Response(status=status.HTTP_200_OK)
 
         return Response(dict(detail=VERIFICATION_TOKEN_MISMATCH), status=status.HTTP_401_UNAUTHORIZED)
 
@@ -191,7 +190,7 @@ class UserEmailVerificationView(UserBaseView):
 class UserPasswordResetView(UserBaseView):
     permission_classes = (AllowAny, )
 
-    def post(self, request, *args, **kwargs):  # pylint: disable=unused-argument,no-self-use
+    def post(self, request, *args, **kwargs):  # pylint: disable=unused-argument
         """Sends reset password mail"""
 
         email = request.data.get('email')
@@ -207,7 +206,7 @@ class UserPasswordResetView(UserBaseView):
         user.send_reset_password_email()
         return Response(status=status.HTTP_200_OK)
 
-    def put(self, request, *args, **kwargs):  # pylint: disable=unused-argument,no-self-use
+    def put(self, request, *args, **kwargs):  # pylint: disable=unused-argument
         """Resets password"""
 
         token = request.data.get('token', None)
@@ -303,8 +302,10 @@ class UserStaffToggleView(UserBaseView, UpdateAPIView):
         user = self.get_object()
         if user.username == self.request.user.username:
             raise Http400()
-        user.is_staff = not user.is_staff
-        user.is_superuser = not user.is_superuser
+        is_admin_already = user.is_staff
+        user.is_staff = not is_admin_already
+        if is_admin_already:
+            user.is_superuser = False
         user.save()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
