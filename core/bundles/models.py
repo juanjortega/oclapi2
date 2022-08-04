@@ -4,20 +4,23 @@ from pydash import compact, get
 from core.bundles.constants import BUNDLE_TYPE_SEARCHSET, RESOURCE_TYPE
 from core.collections.constants import SOURCE_MAPPINGS, SOURCE_TO_CONCEPTS
 from core.common.constants import INCLUDE_MAPPINGS_PARAM, CASCADE_LEVELS_PARAM, CASCADE_MAPPINGS_PARAM, \
-    CASCADE_HIERARCHY_PARAM, CASCADE_METHOD_PARAM, MAP_TYPES_PARAM, EXCLUDE_MAP_TYPES_PARAM, CASCADE_DIRECTION_PARAM
+    CASCADE_HIERARCHY_PARAM, CASCADE_METHOD_PARAM, MAP_TYPES_PARAM, EXCLUDE_MAP_TYPES_PARAM, CASCADE_DIRECTION_PARAM, \
+    INCLUDE_RETIRED_PARAM
 
 
 class Bundle:
-    def __init__(self, root, params=None, verbose=False):
-        self.verbose = verbose
-        self.brief = not verbose
-        self.root = root
+    def __init__(self, root, repo_version, params=None, verbose=False):
+        self.repo_version = repo_version
         self.params = params
+        self.verbose = verbose
+        self.brief = not self.verbose
+        self.root = root
         self.reverse = False
         self.cascade_hierarchy = True
         self.cascade_mappings = True
         self.cascade_levels = '*'
         self.include_mappings = True
+        self.include_retired = False
         self.concepts = None
         self.mappings = None
         self._total = None
@@ -35,6 +38,7 @@ class Bundle:
         self.set_cascade_mappings_criteria()
         self.set_cascade_levels()
         self.set_include_mappings()
+        self.set_include_retired()
 
     @property
     def is_hierarchy_view(self):
@@ -43,6 +47,10 @@ class Bundle:
     def set_include_mappings(self):
         if INCLUDE_MAPPINGS_PARAM in self.params:
             self.include_mappings = self.params[INCLUDE_MAPPINGS_PARAM] in ['true', True]
+
+    def set_include_retired(self):
+        if INCLUDE_RETIRED_PARAM in self.params:
+            self.include_retired = self.params[INCLUDE_RETIRED_PARAM] in ['true', True]
 
     def set_cascade_levels(self):
         if CASCADE_LEVELS_PARAM in self.params:
@@ -110,6 +118,7 @@ class Bundle:
     def cascade_flat(self):
         self.set_cascade_parameters()
         result = self.root.cascade(
+            repo_version=self.repo_version,
             source_mappings=self.cascade_method == SOURCE_MAPPINGS,
             source_to_concepts=self.cascade_method == SOURCE_TO_CONCEPTS,
             mappings_criteria=self.mappings_criteria,
@@ -117,6 +126,7 @@ class Bundle:
             cascade_hierarchy=self.cascade_hierarchy,
             cascade_levels=self.cascade_levels,
             include_mappings=self.include_mappings,
+            include_retired=self.include_retired,
             reverse=self.reverse
         )
         self.concepts = get(result, 'concepts')
@@ -127,6 +137,7 @@ class Bundle:
     def cascade_as_hierarchy(self):
         self.set_cascade_parameters()
         self.root.cascade_as_hierarchy(
+            repo_version=self.repo_version,
             source_mappings=self.cascade_method == SOURCE_MAPPINGS,
             source_to_concepts=self.cascade_method == SOURCE_TO_CONCEPTS,
             mappings_criteria=self.mappings_criteria,
@@ -134,6 +145,7 @@ class Bundle:
             cascade_hierarchy=self.cascade_hierarchy,
             cascade_levels=self.cascade_levels,
             include_mappings=self.include_mappings,
+            include_retired=self.include_retired,
             reverse=self.reverse
         )
 

@@ -4,9 +4,9 @@ from drf_yasg.utils import swagger_auto_schema
 from pydash import get
 from rest_framework import status
 from rest_framework.generics import RetrieveAPIView, DestroyAPIView, ListCreateAPIView, RetrieveUpdateDestroyAPIView, \
-    UpdateAPIView
+    UpdateAPIView, ListAPIView
 from rest_framework.mixins import CreateModelMixin
-from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAdminUser
+from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAdminUser, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -14,7 +14,7 @@ from core.bundles.models import Bundle
 from core.bundles.serializers import BundleSerializer
 from core.common.constants import (
     HEAD, INCLUDE_INVERSE_MAPPINGS_PARAM, INCLUDE_RETIRED_PARAM, ACCESS_TYPE_NONE)
-from core.common.exceptions import Http405
+from core.common.exceptions import Http400
 from core.common.mixins import ListWithHeadersMixin, ConceptDictionaryMixin
 from core.common.swagger_parameters import (
     q_param, limit_param, sort_desc_param, page_param, exact_match_param, sort_asc_param, verbose_param,
@@ -23,9 +23,9 @@ from core.common.swagger_parameters import (
     cascade_map_types_params, cascade_exclude_map_types_params, cascade_hierarchy_param, cascade_mappings_param,
     include_mappings_param, cascade_levels_param, cascade_direction_param, cascade_view_hierarchy)
 from core.common.tasks import delete_concept, make_hierarchy
-from core.common.utils import to_parent_uri_from_kwargs
+from core.common.utils import to_parent_uri_from_kwargs, generate_temp_version
 from core.common.views import SourceChildCommonBaseView, SourceChildExtrasView, \
-    SourceChildExtraRetrieveUpdateDestroyView
+    SourceChildExtraRetrieveUpdateDestroyView, BaseAPIView
 from core.concepts.constants import PARENT_VERSION_NOT_LATEST_CANNOT_UPDATE_CONCEPT
 from core.concepts.documents import ConceptDocument
 from core.concepts.models import Concept, LocalizedText
@@ -35,7 +35,7 @@ from core.concepts.serializers import (
     ConceptDetailSerializer, ConceptListSerializer, ConceptDescriptionSerializer, ConceptNameSerializer,
     ConceptVersionDetailSerializer,
     ConceptVersionListSerializer, ConceptSummarySerializer, ConceptMinimalSerializer,
-    ConceptChildrenSerializer, ConceptParentsSerializer)
+    ConceptChildrenSerializer, ConceptParentsSerializer, ConceptLookupListSerializer)
 from core.mappings.serializers import MappingListSerializer
 
 
@@ -53,6 +53,54 @@ class ConceptBaseView(SourceChildCommonBaseView):
 
     def get_queryset(self):
         return Concept.get_base_queryset(self.params)
+
+    def set_parent_resource(self, __pop=True):
+        parent_resource = None
+        source = self.kwargs.pop('source', None) if __pop else self.kwargs.get('source', None)
+        collection = self.kwargs.pop('collection', None) if __pop else self.kwargs.get('collection', None)
+        container_version = self.kwargs.pop('version', HEAD) if __pop else self.kwargs.get('version', HEAD)
+        if 'org' in self.kwargs:
+            filters = dict(organization__mnemonic=self.kwargs['org'])
+        else:
+            username = self.request.user.username if self.user_is_self else self.kwargs.get('user')
+            filters = dict(user__username=username)
+        if source:
+            from core.sources.models import Source
+            parent_resource = Source.get_version(source, container_version or HEAD, filters)
+        if collection:
+            from core.collections.models import Collection
+            parent_resource = Collection.get_version(collection, container_version or HEAD, filters)
+        self.kwargs['parent_resource'] = self.parent_resource = parent_resource
+
+
+# this is a cached view (expiry 24 hours)
+# used for TermBrowser forms lookup values -- map-types/locales/datatypes/etc
+class ConceptLookupValuesView(ListAPIView, BaseAPIView):  # pragma: no cover
+    serializer_class = ConceptLookupListSerializer
+    permission_classes = (AllowAny, )
+
+    def set_parent_resource(self):
+        parent_resource = None
+        source = self.kwargs.get('source', None)
+        if 'org' in self.kwargs:
+            filters = dict(organization__mnemonic=self.kwargs['org'])
+        else:
+            username = self.request.user.username if self.user_is_self else self.kwargs.get('user')
+            filters = dict(user__username=username)
+        if source:
+            from core.sources.models import Source
+            parent_resource = Source.get_version(source, HEAD, filters)
+        self.kwargs['parent_resource'] = self.parent_resource = parent_resource
+
+    def get_queryset(self):
+        self.set_parent_resource()
+        if self.parent_resource:
+            queryset = self.parent_resource.concepts_set.filter(id=F('versioned_object_id'))
+            if self.is_verbose():
+                queryset = queryset.prefetch_related('names')
+            return queryset
+
+        raise Http404()
 
 
 class ConceptListView(ConceptBaseView, ListWithHeadersMixin, CreateModelMixin):
@@ -78,18 +126,31 @@ class ConceptListView(ConceptBaseView, ListWithHeadersMixin, CreateModelMixin):
     def get_queryset(self):
         is_latest_version = 'collection' not in self.kwargs and 'version' not in self.kwargs or get(
             self.kwargs, 'version') == HEAD
-        queryset = super().get_queryset().prefetch_related('names')
+        parent = get(self, 'parent_resource')
+        if parent:
+            queryset = parent.concepts_set if parent.is_head else parent.concepts
+            queryset = Concept.apply_attribute_based_filters(queryset, self.params).filter(is_active=True)
+        else:
+            queryset = super().get_queryset()
+
         if is_latest_version:
             queryset = queryset.filter(id=F('versioned_object_id'))
-        user = self.request.user
-        if get(user, 'is_anonymous'):
-            queryset = queryset.exclude(public_access=ACCESS_TYPE_NONE)
-        elif not get(user, 'is_staff'):
-            public_queryset = queryset.exclude(public_access=ACCESS_TYPE_NONE)
-            private_queryset = queryset.filter(public_access=ACCESS_TYPE_NONE)
-            private_queryset = private_queryset.filter(
-                Q(parent__user_id=user.id) | Q(parent__organization__members__id=user.id))
-            queryset = public_queryset.union(private_queryset)
+
+        if 'source' in self.kwargs and self.request.query_params.get('onlyParentLess', False) in ['true', True]:
+            queryset = queryset.filter(parent_concepts__isnull=True)
+
+        if not parent:
+            user = self.request.user
+            is_anonymous = get(user, 'is_anonymous')
+            is_staff = get(user, 'is_staff')
+            if is_anonymous:
+                queryset = queryset.exclude(public_access=ACCESS_TYPE_NONE)
+            elif not is_staff:
+                public_queryset = queryset.exclude(public_access=ACCESS_TYPE_NONE)
+                private_queryset = queryset.filter(public_access=ACCESS_TYPE_NONE)
+                private_queryset = private_queryset.filter(
+                    Q(parent__user_id=user.id) | Q(parent__organization__members__id=user.id))
+                queryset = public_queryset.union(private_queryset)
 
         return queryset
 
@@ -106,36 +167,20 @@ class ConceptListView(ConceptBaseView, ListWithHeadersMixin, CreateModelMixin):
             self.check_object_permissions(request, self.parent_resource)
         return self.list(request, *args, **kwargs)
 
-    def set_parent_resource(self, __pop=True):
-        parent_resource = None
-        source = self.kwargs.pop('source', None) if __pop else self.kwargs.get('source', None)
-        collection = self.kwargs.pop('collection', None) if __pop else self.kwargs.get('collection', None)
-        container_version = self.kwargs.pop('version', HEAD) if __pop else self.kwargs.get('version', HEAD)
-        if 'org' in self.kwargs:
-            filters = dict(organization__mnemonic=self.kwargs['org'])
-        else:
-            username = self.request.user.username if self.user_is_self else self.kwargs.get('user')
-            filters = dict(user__username=username)
-        if source:
-            from core.sources.models import Source
-            parent_resource = Source.get_version(source, container_version or HEAD, filters)
-        if collection:
-            from core.collections.models import Collection
-            parent_resource = Collection.get_version(source, container_version or HEAD, filters)
-        self.kwargs['parent_resource'] = self.parent_resource = parent_resource
-
-    def post(self, request, **kwargs):  # pylint: disable=unused-argument
+    def post(self, request, **_):
         self.set_parent_resource()
         if not self.parent_resource:
             raise Http404()
-        serializer = self.get_serializer(data={
-            **request.data, 'parent_id': self.parent_resource.id, 'name': request.data.get('id', None)
-        })
+        concept_id = request.data.get('id') or generate_temp_version()
+        if isinstance(request.data, list):
+            raise Http400()
+        serializer = self.get_serializer(
+            data={**request.data, 'parent_id': self.parent_resource.id, 'id': concept_id, 'name': concept_id}
+        )
         if serializer.is_valid():
-            self.object = serializer.save()
+            serializer.save()
             if serializer.is_valid():
                 headers = self.get_success_headers(serializer.data)
-                serializer = ConceptDetailSerializer(self.object, context=dict(request=request))
                 return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -169,10 +214,9 @@ class ConceptCollectionMembershipView(ConceptBaseView, ListWithHeadersMixin):
 
     def get_object(self, queryset=None):
         queryset = Concept.get_base_queryset(self.params)
-        if 'concept_version' in self.kwargs:
-            instance = queryset.first()
-        else:
-            instance = queryset.filter(id=F('versioned_object_id')).first().get_latest_version()
+        if 'concept_version' not in self.kwargs:
+            queryset = queryset.filter(id=F('versioned_object_id'))
+        instance = queryset.first()
 
         if not instance:
             raise Http404()
@@ -184,8 +228,11 @@ class ConceptCollectionMembershipView(ConceptBaseView, ListWithHeadersMixin):
     def get_queryset(self):
         instance = self.get_object()
 
-        return instance.collection_set.filter(
-            organization_id=instance.parent.organization_id, user_id=instance.parent.user_id)
+        from core.collections.models import Collection
+        return Collection.objects.filter(id__in=instance.expansion_set.filter(
+            collection_version__organization_id=instance.parent.organization_id,
+            collection_version__user_id=instance.parent.user_id
+        ).values_list('collection_version_id', flat=True))
 
     def get(self, request, *args, **kwargs):
         return self.list(request, *args, **kwargs)
@@ -194,9 +241,14 @@ class ConceptCollectionMembershipView(ConceptBaseView, ListWithHeadersMixin):
 class ConceptRetrieveUpdateDestroyView(ConceptBaseView, RetrieveAPIView, UpdateAPIView, DestroyAPIView):
     serializer_class = ConceptDetailSerializer
 
+    def is_container_version_specified(self):
+        return 'version' in self.kwargs
+
     def get_object(self, queryset=None):
         queryset = self.get_queryset()
-        instance = queryset.filter(id=F('versioned_object_id')).first()
+        if not self.is_container_version_specified():
+            queryset = queryset.filter(id=F('versioned_object_id'))
+        instance = queryset.first()
         if not instance:
             raise Http404()
 
@@ -214,6 +266,9 @@ class ConceptRetrieveUpdateDestroyView(ConceptBaseView, RetrieveAPIView, UpdateA
         return [CanEditParentDictionary(), ]
 
     def update(self, request, *args, **kwargs):
+        if self.is_container_version_specified():
+            return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
         self.object = self.get_object()
         partial = kwargs.pop('partial', True)
         self.parent_resource = self.object.parent
@@ -238,10 +293,16 @@ class ConceptRetrieveUpdateDestroyView(ConceptBaseView, RetrieveAPIView, UpdateA
         return self.request.query_params.get('db', None) in ['true', True, 'True']
 
     def destroy(self, request, *args, **kwargs):
+        if self.is_container_version_specified():
+            return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
         is_hard_delete_requested = self.is_hard_delete_requested()
         if self.is_db_delete_requested() and is_hard_delete_requested:
             parent_filters = Concept.get_parent_and_owner_filters_from_kwargs(self.kwargs)
-            result = Concept.objects.filter(mnemonic=self.kwargs['concept'], **parent_filters).delete()
+            concepts = Concept.objects.filter(mnemonic=self.kwargs['concept'], **parent_filters)
+            concept = concepts.filter(id=F('versioned_object_id')).first()
+            parent = concept.parent
+            result = concepts.delete()
+            parent.update_concepts_count()
             return Response(result, status=status.HTTP_204_NO_CONTENT)
 
         concept = self.get_object()
@@ -269,11 +330,8 @@ class ConceptCascadeView(ConceptBaseView):
     serializer_class = BundleSerializer
 
     def get_object(self, queryset=None):
-        if 'collection' in self.kwargs:
-            raise Http405()
-
         queryset = self.get_queryset()
-        if 'concept_version' not in self.kwargs:
+        if 'concept_version' not in self.kwargs and 'version' not in self.kwargs and 'collection' not in self.kwargs:
             queryset = queryset.filter(id=F('versioned_object_id'))
 
         instance = queryset.first()
@@ -288,18 +346,23 @@ class ConceptCascadeView(ConceptBaseView):
         manual_parameters=[
             cascade_method_param, cascade_map_types_params, cascade_exclude_map_types_params,
             cascade_hierarchy_param, cascade_mappings_param, include_mappings_param, cascade_levels_param,
-            cascade_direction_param, cascade_view_hierarchy
+            cascade_direction_param, cascade_view_hierarchy, include_retired_param
         ]
     )
     def get(self, request, **kwargs):  # pylint: disable=unused-argument
         instance = self.get_object()
-        bundle = Bundle(root=instance, params=self.request.query_params, verbose=self.is_verbose())
+        self.set_parent_resource(False)
+        bundle = Bundle(
+            root=instance, params=self.request.query_params, verbose=self.is_verbose(),
+            repo_version=self.parent_resource
+        )
         bundle.cascade()
         return Response(BundleSerializer(bundle, context=dict(request=request)).data)
 
 
 class ConceptChildrenView(ConceptBaseView, ListWithHeadersMixin):
     serializer_class = ConceptChildrenSerializer
+    default_qs_sort_attr = 'mnemonic'
 
     def get_queryset(self):
         instance = super().get_queryset().filter(id=F('versioned_object_id')).first()
@@ -330,6 +393,7 @@ class ConceptParentsView(ConceptBaseView, ListWithHeadersMixin):
 
 class ConceptReactivateView(ConceptBaseView, UpdateAPIView):
     serializer_class = ConceptDetailSerializer
+    permission_classes = (CanEditParentDictionary, )
 
     def get_object(self, queryset=None):
         instance = self.get_queryset().filter(id=F('versioned_object_id')).first()
@@ -338,12 +402,6 @@ class ConceptReactivateView(ConceptBaseView, UpdateAPIView):
 
         self.check_object_permissions(self.request, instance)
         return instance
-
-    def get_permissions(self):
-        if self.request.method in ['GET']:
-            return [CanViewParentDictionary(), ]
-
-        return [CanEditParentDictionary(), ]
 
     def update(self, request, *args, **kwargs):
         concept = self.get_object()
@@ -362,9 +420,11 @@ class ConceptVersionsView(ConceptBaseView, ConceptDictionaryMixin, ListWithHeade
     permission_classes = (CanViewParentDictionary,)
 
     def get_queryset(self):
-        queryset = super().get_queryset()
-        self.check_object_permissions(self.request, queryset.first())
-        return queryset.exclude(id=F('versioned_object_id'))
+        concept = super().get_queryset().filter(id=F('versioned_object_id')).first()
+        if not concept:
+            raise Http404()
+        self.check_object_permissions(self.request, concept)
+        return concept.versions
 
     def get_serializer_class(self):
         return ConceptVersionDetailSerializer if self.is_verbose() else ConceptVersionListSerializer

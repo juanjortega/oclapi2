@@ -142,11 +142,11 @@ class UserProfile(AbstractUser, BaseModel, CommonLogoModel, SourceContainerMixin
     def reset_password_url(self):
         return f"{web_url()}/#/accounts/{self.username}/password/reset/{self.verification_token}/"
 
-    def mark_verified(self, token):
+    def mark_verified(self, token, force=False):
         if self.verified:
             return True
 
-        if token == self.verification_token:
+        if token == self.verification_token or force:
             self.verified = True
             self.verification_token = None
             self.deactivated_at = None
@@ -167,9 +167,6 @@ class UserProfile(AbstractUser, BaseModel, CommonLogoModel, SourceContainerMixin
     def auth_headers(self):
         return dict(Authorization=f'Token {self.get_token()}')
 
-    def organizations_count(self):
-        return self.organizations.count()
-
     def deactivate(self):
         self.is_active = False
         self.verified = False
@@ -189,3 +186,10 @@ class UserProfile(AbstractUser, BaseModel, CommonLogoModel, SourceContainerMixin
 
     def soft_delete(self):
         self.deactivate()
+
+    def undelete(self):
+        self.verified = True
+        self.verification_token = None
+        self.deactivated_at = None
+        self.is_active = True
+        self.save()

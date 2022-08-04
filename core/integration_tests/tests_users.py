@@ -4,8 +4,10 @@ from rest_framework.exceptions import ErrorDetail
 
 from core.common.constants import ACCESS_TYPE_NONE, ACCESS_TYPE_VIEW, ACCESS_TYPE_EDIT
 from core.common.tests import OCLAPITestCase
+from core.orgs.documents import OrganizationDocument
 from core.orgs.tests.factories import OrganizationFactory
 from core.users.constants import VERIFY_EMAIL_MESSAGE, VERIFICATION_TOKEN_MISMATCH
+from core.users.documents import UserProfileDocument
 from core.users.models import UserProfile
 from core.users.tests.factories import UserProfileFactory
 
@@ -71,7 +73,6 @@ class UserSignupVerificationViewTest(OCLAPITestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, dict(token=created_user.get_token()))
         created_user.refresh_from_db()
         self.assertTrue(created_user.verified)
 
@@ -175,6 +176,10 @@ class UserOrganizationListViewTest(OCLAPITestCase):
         self.user_org_private = OrganizationFactory(mnemonic='user-private-org', public_access=ACCESS_TYPE_NONE)
         self.user.organizations.set([self.user_org_private, self.user_org_public])
         self.token = self.user.get_token()
+        OrganizationDocument().update([
+            self.org_private, self.org_public_view, self.org_public_edit,
+            self.user_org_public, self.user_org_private
+        ])
 
     def test_get_200(self):
         response = self.client.get(
@@ -194,6 +199,76 @@ class UserOrganizationListViewTest(OCLAPITestCase):
         response = self.client.get(
             f'/users/{random_user.username}/orgs/',
             HTTP_AUTHORIZATION='Token ' + random_user.get_token(),
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 0)
+
+        response = self.client.get(
+            f'/users/{self.user.username}/orgs/?q=private',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(
+            [org['id'] for org in response.data],
+            ['user-private-org']
+        )
+
+        response = self.client.get(
+            '/user/orgs/?q=private',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(
+            [org['id'] for org in response.data],
+            ['user-private-org']
+        )
+
+        response = self.client.get(
+            '/user/orgs/?q=private&updatedSince=2021-01-01',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(
+            [org['id'] for org in response.data],
+            ['user-private-org']
+        )
+
+        response = self.client.get(
+            '/user/orgs/?q=private&updatedSince=3022-01-01',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 0)
+
+        response = self.client.get(
+            '/user/orgs/?q=',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 2)
+        self.assertEqual(
+            sorted([org['id'] for org in response.data]),
+            sorted(['user-private-org', 'user-public-view-org'])
+        )
+
+        response = self.client.get(
+            '/user/orgs/?q=foobar',
+            HTTP_AUTHORIZATION='Token ' + self.token,
             format='json'
         )
 
@@ -301,6 +376,7 @@ class UserListViewTest(OCLAPITestCase):
     def setUp(self):
         super().setUp()
         self.superuser = UserProfile.objects.get(username='ocladmin')
+        UserProfileDocument().update([self.superuser])
 
     def test_get_200(self):
         response = self.client.get(
@@ -322,8 +398,25 @@ class UserListViewTest(OCLAPITestCase):
         self.assertEqual(response.data[0]['username'], 'ocladmin')
         self.assertEqual(response.data[0]['email'], self.superuser.email)
 
+        response = self.client.get(
+            '/users/?q=ocl',
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+
+        response = self.client.get(
+            '/users/?q=foobar',
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 0)
+
     def test_get_200_with_inactive_user(self):
-        UserProfileFactory(is_active=False, username='inactive')
+        inactive_user = UserProfileFactory(is_active=False, username='inactive')
+        UserProfileDocument().update([inactive_user])
 
         response = self.client.get(
             '/users/',
@@ -342,6 +435,24 @@ class UserListViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data), 2)
         self.assertEqual(sorted(user['username'] for user in response.data), sorted(['ocladmin', 'inactive']))
+
+        response = self.client.get(
+            '/users/?includeInactive=true&q=',
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 2)
+        self.assertEqual(sorted(user['username'] for user in response.data), sorted(['ocladmin', 'inactive']))
+
+        response = self.client.get(
+            '/users/?includeInactive=true&q=inactive',
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['username'], 'inactive')
 
     def test_get_summary_200(self):
         response = self.client.get(
@@ -574,7 +685,7 @@ class UserStaffToggleViewTest(OCLAPITestCase):
     def setUp(self):
         super().setUp()
         self.superuser = UserProfile.objects.get(username='ocladmin')
-        self.user = UserProfileFactory()
+        self.user = UserProfileFactory(username='randomuser')
         self.assertFalse(self.user.is_staff)
         self.assertFalse(self.user.is_superuser)
 
@@ -588,7 +699,7 @@ class UserStaffToggleViewTest(OCLAPITestCase):
 
         self.user.refresh_from_db()
         self.assertTrue(self.user.is_staff)
-        self.assertTrue(self.user.is_superuser)
+        self.assertFalse(self.user.is_superuser)
 
         response = self.client.put(
             f'/users/{self.user.username}/staff/',

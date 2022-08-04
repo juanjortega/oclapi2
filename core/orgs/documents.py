@@ -1,3 +1,5 @@
+import json
+
 from django_elasticsearch_dsl import Document, fields
 from django_elasticsearch_dsl.registries import registry
 
@@ -27,6 +29,10 @@ class OrganizationDocument(Document):
         ]
 
     @staticmethod
+    def get_boostable_search_attrs():
+        return dict(mnemonic=dict(boost=5, wildcard=True, lower=True), name=dict(boost=4, wildcard=True, lower=True))
+
+    @staticmethod
     def prepare_extras(instance):
         value = {}
 
@@ -35,6 +41,8 @@ class OrganizationDocument(Document):
             if isinstance(value, dict):
                 value = flatten_dict(value)
 
+        if value:
+            value = json.loads(json.dumps(value).replace('-', '_'))
         return value or {}
 
     @staticmethod

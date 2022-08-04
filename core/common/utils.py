@@ -1,3 +1,5 @@
+# pylint: disable=cyclic-import # only occurring in dev env
+
 import json
 import mimetypes
 import os
@@ -6,7 +8,8 @@ import shutil
 import tempfile
 import uuid
 import zipfile
-from collections import MutableMapping, OrderedDict  # pylint: disable=no-name-in-module,deprecated-class
+from collections import OrderedDict
+from collections.abc import MutableMapping  # pylint: disable=no-name-in-module,deprecated-class
 from threading import local
 from urllib import parse
 
@@ -14,14 +17,16 @@ import requests
 from celery_once.helpers import queue_once_key
 from dateutil import parser
 from django.conf import settings
-from django.urls import NoReverseMatch, reverse, get_resolver, resolve, Resolver404
+from django.urls import NoReverseMatch, reverse, get_resolver
 from djqscsv import csv_file_for
+from elasticsearch_dsl import Q as es_Q
 from pydash import flatten, compact, get
 from requests.auth import HTTPBasicAuth
 from rest_framework.utils import encoders
 
-from core.common.constants import UPDATED_SINCE_PARAM, BULK_IMPORT_QUEUES_COUNT, TEMP, CURRENT_USER, REQUEST_URL
-from core.common.services import S3
+from core.common.constants import UPDATED_SINCE_PARAM, BULK_IMPORT_QUEUES_COUNT, CURRENT_USER, REQUEST_URL, \
+    TEMP_PREFIX
+from core.settings import EXPORT_SERVICE
 
 
 def get_latest_dir_in_path(path):  # pragma: no cover
@@ -45,12 +50,12 @@ def write_csv_to_s3(data, is_owner, **kwargs):  # pragma: no cover
         zip_file.write(csv_file.name)
 
     key = get_downloads_path(is_owner) + zip_file.filename
-    S3.upload_file(
+    get_export_service().upload_file(
         key=key, file_path=os.path.abspath(zip_file.filename), binary=True,
         metadata=dict(ContentType='application/zip'), headers={'content-type': 'application/zip'}
     )
     os.chdir(cwd)
-    return S3.url_for(key)
+    return get_export_service().url_for(key)
 
 
 def compact_dict_by_values(_dict):
@@ -69,8 +74,9 @@ def get_downloads_path(is_owner):  # pragma: no cover
 def get_csv_from_s3(filename, is_owner):  # pragma: no cover
     filename = get_downloads_path(is_owner) + filename + '.csv.zip'
 
-    if S3.exists(filename):
-        return S3.url_for(filename)
+    export_service = get_export_service()
+    if export_service.exists(filename):
+        return export_service.url_for(filename)
 
     return None
 
@@ -144,10 +150,10 @@ def get_kwargs_for_view(view_name):
 
 
 def parse_updated_since_param(params):
-    return parse_updated_since(params.get(UPDATED_SINCE_PARAM))
+    return from_string_to_date(params.get(UPDATED_SINCE_PARAM))
 
 
-def parse_updated_since(updated_since):  # pragma: no cover
+def from_string_to_date(updated_since):  # pragma: no cover
     if updated_since:
         try:
             return parser.parse(updated_since)
@@ -171,16 +177,6 @@ def get_query_params_from_url_string(url):
         return dict(parse.parse_qsl(parse.urlsplit(url).query))
     except:  # pylint: disable=bare-except  # pragma: no cover
         return {}
-
-
-def is_valid_uri(uri):
-    try:
-        resolve(uri)
-        return True
-    except Resolver404:
-        pass
-
-    return False
 
 
 def get_class(kls):
@@ -211,13 +207,13 @@ def write_export_file(
     batch_size = 100
     is_collection = resource_type == 'collection'
 
+    concepts_qs = Concept.objects.none()
+    mappings_qs = Mapping.objects.none()
+
     if is_collection:
         if version.expansion_uri:
             concepts_qs = Concept.expansion_set.through.objects.filter(expansion_id=version.expansion.id)
             mappings_qs = Mapping.expansion_set.through.objects.filter(expansion_id=version.expansion.id)
-        else:
-            concepts_qs = Concept.collection_set.through.objects.filter(collection_id=version.id)
-            mappings_qs = Mapping.collection_set.through.objects.filter(collection_id=version.id)
     else:
         concepts_qs = Concept.sources.through.objects.filter(source_id=version.id)
         mappings_qs = Mapping.sources.through.objects.filter(source_id=version.id)
@@ -335,11 +331,16 @@ def write_export_file(
     logger.info('Done compressing.  Uploading...')
 
     s3_key = version.export_path
-    S3.upload_file(
+    export_service = get_export_service()
+    if version.is_head:
+        export_service.delete_objects(version.generic_export_path(suffix=None))
+
+    upload_status_code = export_service.upload_file(
         key=s3_key, file_path=file_path, binary=True, metadata=dict(ContentType='application/zip'),
         headers={'content-type': 'application/zip'}
     )
-    uploaded_path = S3.url_for(s3_key)
+    logger.info(f'Upload response status: {str(upload_status_code)}')
+    uploaded_path = export_service.url_for(s3_key)
     logger.info(f'Uploaded to {uploaded_path}.')
 
     if not get(settings, 'TEST_MODE', False):
@@ -525,7 +526,11 @@ def separate_version(expression):
 
 
 def generate_temp_version():
-    return f"{TEMP}-{str(uuid.uuid4())[:8]}"
+    return f"{TEMP_PREFIX}{str(uuid.uuid4())[:8]}"
+
+
+def startswith_temp_version(value):
+    return value.startswith(TEMP_PREFIX)
 
 
 def jsonify_safe(value):
@@ -680,7 +685,7 @@ def to_parent_uri_from_kwargs(params):
 
 def api_get(url, user, **kwargs):
     response = requests.get(
-        settings.API_INTERNAL_BASE_URL + url, headers=user.auth_headers,
+        settings.API_BASE_URL + url, headers=user.auth_headers,
         **kwargs
     )
     return response.json()
@@ -690,11 +695,11 @@ thread_locals = local()
 
 
 def set_current_user(func):
-    setattr(thread_locals, CURRENT_USER, func.__get__(func, local))
+    setattr(thread_locals, CURRENT_USER, func.__get__(func, local))  # pylint: disable=unnecessary-dunder-call
 
 
 def set_request_url(func):
-    setattr(thread_locals, REQUEST_URL, func.__get__(func, local))
+    setattr(thread_locals, REQUEST_URL, func.__get__(func, local))  # pylint: disable=unnecessary-dunder-call
 
 
 def get_current_user():
@@ -727,3 +732,124 @@ def nested_dict_values(_dict):
             yield from nested_dict_values(value)
         else:
             yield value
+
+
+def chunks(lst, size):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
+
+
+def es_id_in(search, ids):
+    if ids:
+        return search.query("terms", _id=ids)
+    return search
+
+
+def get_es_wildcard_search_criterion(search_str, name_attr='name'):
+    def get_query(_str):
+        return es_Q(
+            "wildcard", id=dict(value=_str, boost=2)
+        ) | es_Q(
+            "wildcard", **{name_attr: dict(value=_str, boost=5)}
+        ) | es_Q(
+            "query_string", query=f"*{_str}*"
+        )
+
+    if search_str:
+        words = search_str.split()
+        criterion = get_query(words[0])
+        for word in words[1:]:
+            criterion |= get_query(word)
+    else:
+        criterion = get_query(search_str)
+
+    return criterion
+
+
+def get_es_exact_search_criterion(search_str, fields):
+    def get_query(attr):
+        words = search_str.split(' ')
+        criteria = es_Q('match', **{attr: words[0]})
+        for word in words[1:]:
+            criteria &= es_Q('match', **{attr: word})
+        return criteria
+
+    criterion = get_query(fields.pop())
+    for field in fields:
+        criterion |= get_query(field)
+
+    return criterion
+
+
+def es_wildcard_search(search, search_str, exact_search_fields, name_attr='name'):
+    if not search_str:
+        return search
+
+    return search.query(
+        get_es_wildcard_search_criterion(
+            search_str, name_attr) | get_es_exact_search_criterion(search_str, exact_search_fields))
+
+
+def es_exact_search(search, search_str, exact_search_fields):
+    if not search_str:
+        return search
+
+    return search.query(get_es_exact_search_criterion(search_str, exact_search_fields))
+
+
+def get_exact_search_fields(klass):
+    return [field for field, config in get(klass, 'es_fields', {}).items() if config.get('exact', False)]
+
+
+def es_to_pks(search):
+    # doesn't care about the order
+    default_limit = 25
+    limit = default_limit
+    offset = 0
+    result_count = 25
+    pks = []
+    while result_count > 0:
+        hits = search[offset:limit].execute().hits
+        result_count = len(hits)
+        if result_count:
+            pks += [hit.meta.id for hit in hits]
+        offset += default_limit
+        limit += default_limit
+    return pks
+
+
+def batch_qs(qs, batch_size=1000):
+    """
+    Returns a sub-queryset for each batch in the given queryset.
+
+    Usage:
+        # Make sure to order your querset
+        article_qs = Article.objects.order_by('id')
+        for qs in batch_qs(article_qs):
+            for article in qs:
+                print article.body
+    """
+    total = qs.count()
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+        yield qs[start:end]
+
+
+def split_list_by_condition(items, predicate):
+    include, exclude = [], []
+    for item in items:
+        (exclude, include)[predicate(item)].append(item)
+
+    return include, exclude
+
+
+def is_canonical_uri(string):
+    return ':' in string
+
+
+def get_export_service():
+    parts = EXPORT_SERVICE.split('.')
+    klass = parts[-1]
+    mod = __import__('.'.join(parts[0:-1]), fromlist=[klass])
+    return getattr(mod, klass)

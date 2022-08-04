@@ -10,7 +10,7 @@ from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
-from elasticsearch import RequestError
+from elasticsearch import RequestError, TransportError
 from elasticsearch_dsl import Q
 from pydash import get
 from rest_framework import response, generics, status
@@ -22,7 +22,7 @@ from rest_framework.views import APIView
 from core import __version__
 from core.common.constants import SEARCH_PARAM, LIST_DEFAULT_LIMIT, CSV_DEFAULT_LIMIT, \
     LIMIT_PARAM, NOT_FOUND, MUST_SPECIFY_EXTRA_PARAM_IN_BODY, INCLUDE_RETIRED_PARAM, VERBOSE_PARAM, HEAD, LATEST, \
-    BRIEF_PARAM, ES_REQUEST_TIMEOUT, INCLUDE_INACTIVE
+    BRIEF_PARAM, ES_REQUEST_TIMEOUT, INCLUDE_INACTIVE, FHIR_LIMIT_PARAM
 from core.common.exceptions import Http400
 from core.common.mixins import PathWalkerMixin, ListWithHeadersMixin
 from core.common.serializers import RootSerializer
@@ -110,7 +110,8 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         if self.user_is_self and self.request.user.is_anonymous:
             raise Http404()
 
-        self.limit = request.query_params.dict().get(LIMIT_PARAM, LIST_DEFAULT_LIMIT)
+        params = request.query_params.dict()
+        self.limit = params.get(LIMIT_PARAM, None) or params.get(FHIR_LIMIT_PARAM, None) or LIST_DEFAULT_LIMIT
 
     def get_object(self, queryset=None):  # pylint: disable=arguments-differ
         # Determine the base queryset to use.
@@ -175,16 +176,11 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
     def is_exact_match_on(self):
         return self.request.query_params.dict().get(self.exact_match, None) == 'on'
 
-    def get_searchable_fields(self):
-        return [field for field, config in get(self, 'es_fields', {}).items() if config.get('filterable', False)]
-
     def get_exact_search_fields(self):
         return [field for field, config in get(self, 'es_fields', {}).items() if config.get('exact', False)]
 
     def get_search_string(self, lower=True, decode=True):
         search_str = self.request.query_params.dict().get(SEARCH_PARAM, '').strip()
-        if self.is_concept_document():
-            search_str = search_str.replace('-', '_')
         if lower:
             search_str = search_str.lower()
         if decode:
@@ -230,7 +226,10 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
 
         def get_query(attr):
             words = search_str.split(' ')
-            criteria = Q('match', **{attr: words[0]})
+            if words[0] != search_str:
+                criteria = Q('match', **{attr: search_str}) | Q('match', **{attr: words[0]})
+            else:
+                criteria = Q('match', **{attr: words[0]})
             for word in words[1:]:
                 criteria &= Q('match', **{attr: word})
             return criteria
@@ -290,6 +289,8 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
             filters['collection'] = kwargs['collection']
             filters['collection_owner_url'] = f'/users/{kwargs["user"]}/' if is_user_specified else \
                 f'/orgs/{kwargs["org"]}/'
+            if 'expansion' in self.kwargs:
+                filters['expansion'] = self.kwargs.get('expansion')
         else:
             if is_user_specified:
                 filters['ownerType'] = USER_OBJECT_TYPE
@@ -377,30 +378,35 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
                 filters=filters, exact_match=is_exact_match_on
             )
             faceted_search.params(request_timeout=ES_REQUEST_TIMEOUT)
-            facets = faceted_search.execute().facets.to_dict()
+            try:
+                facets = faceted_search.execute().facets.to_dict()
+            except TransportError as ex:  # pragma: no cover
+                raise Http400(detail='Data too large.') from ex
 
         return facets
 
     def get_extras_searchable_fields_from_query_params(self):
         query_params = self.request.query_params.dict()
-
+        is_source_child = self.is_source_child_document_model()
         result = {}
-
         for key, value in query_params.items():
             if key.startswith('extras.') and not key.startswith('extras.exists') and not key.startswith('extras.exact'):
                 parts = key.split('extras.')
-                result['extras.' + parts[1].replace('.', '__')] = value
+                value = value.replace('/', '\\/')
+                result['extras.' + parts[1].replace('.', '__')] = value if is_source_child else value.replace('-', '_')
 
         return result
 
     def get_extras_exact_fields_from_query_params(self):
         query_params = self.request.query_params.dict()
+        is_source_child = self.is_source_child_document_model()
         result = {}
         for key, value in query_params.items():
             if key.startswith('extras.exact'):
                 new_key = key.replace('.exact', '')
                 parts = new_key.split('extras.')
-                result['extras.' + parts[1].replace('.', '__')] = value
+                value = value.replace('/', '\\/')
+                result['extras.' + parts[1].replace('.', '__')] = value if is_source_child else value.replace('-', '_')
 
         return result
 
@@ -506,14 +512,12 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
 
             if extras_fields:
                 for field, value in extras_fields.items():
-                    value = value.replace('/', '\\/')
                     results = results.filter("query_string", query=value, fields=[field])
             if extras_fields_exists:
                 for field in extras_fields_exists:
                     results = results.query("exists", field=f"extras.{field}")
             if extras_fields_exact:
                 for field, value in extras_fields_exact.items():
-                    value = value.replace('/', '\\/')
                     results = results.query("match", **{field: value}, _expand__to_dot=False)
 
             if self._should_exclude_retired_from_search_results():
@@ -562,18 +566,21 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
 
     def get_wildcard_search_criterion(self):
         search_string = self.get_search_string()
-        name_attr = 'name'
-        if self.is_concept_document():
-            name_attr = '_name'
+        boost_attrs = self.document_model.get_boostable_search_attrs() or {}
 
         def get_query(_str):
-            return Q(
-                "wildcard", id=dict(value=_str, boost=2)
-            ) | Q(
-                "wildcard", **{name_attr: dict(value=_str, boost=5)}
-            ) | Q(
-                "query_string", query=self.get_wildcard_search_string(_str)
-            )
+            query = Q("query_string", query=self.get_wildcard_search_string(_str), boost=0)
+            for attr, meta in boost_attrs.items():
+                is_wildcard = meta.get('wildcard', False)
+                decode = meta.get('decode', False)
+                lower = meta.get('lower', False)
+                _search_string = _str
+                if lower or decode:
+                    _search_string = self.get_search_string(decode=decode, lower=lower)
+                if is_wildcard:
+                    _search_string = self.get_wildcard_search_string(_search_string)
+                query |= Q("wildcard", **{attr: dict(value=_search_string, boost=meta['boost'])})
+            return query
 
         if not search_string:
             return get_query(search_string)
@@ -585,31 +592,28 @@ class BaseAPIView(generics.GenericAPIView, PathWalkerMixin):
         return criterion
 
     def get_search_results_qs(self):
-        if not self.should_perform_es_search():
-            return None
-
         search_results = self.__search_results
         search_results = search_results.params(request_timeout=ES_REQUEST_TIMEOUT)
-        self.total_count = search_results.count()
+        try:
+            self.total_count = search_results.count()
+        except TransportError as ex:
+            raise Http400(detail='Data too large.') from ex
 
-        if isinstance(self.limit, str):
-            self.limit = int(self.limit)
+        self.limit = int(self.limit)
 
         self.limit = self.limit or LIST_DEFAULT_LIMIT
-
-        page = int(self.request.GET.get('page', '1'))
+        page = max(int(self.request.GET.get('page') or '1'), 1)
         start = (page - 1) * self.limit
         end = start + self.limit
         try:
             return search_results[start:end].to_queryset()
-        except RequestError as ex:
+        except RequestError as ex:  # pragma: no cover
             if get(ex, 'info.error.caused_by.reason', '').startswith('Result window is too large'):
                 raise Http400(detail='Only 10000 results are available. Please apply additional filters'
                                      ' or fine tune your query to get more accurate results.') from ex
             raise ex
-
-    def is_head(self):
-        return self.request.method.lower() == 'head'
+        except TransportError as ex:  # pragma: no cover
+            raise Http400(detail='Data too large.') from ex
 
     def should_perform_es_search(self):
         return bool(self.get_search_string()) or self.has_searchable_extras_fields() or bool(self.get_faceted_filters())
@@ -737,7 +741,7 @@ class SourceChildExtraRetrieveUpdateDestroyView(SourceChildExtrasBaseView, Retri
         return Response(dict(detail=NOT_FOUND), status=status.HTTP_404_NOT_FOUND)
 
 
-class APIVersionView(APIView):
+class APIVersionView(APIView):  # pragma: no cover
     permission_classes = (AllowAny,)
     swagger_schema = None
 
@@ -746,7 +750,7 @@ class APIVersionView(APIView):
         return Response(__version__)
 
 
-class ChangeLogView(APIView):
+class ChangeLogView(APIView):  # pragma: no cover
     permission_classes = (AllowAny, )
     swagger_schema = None
 
@@ -877,7 +881,8 @@ class ConceptDormantLocalesView(APIView):  # pragma: no cover
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class ConceptMultipleLatestVersionsView(BaseAPIView, ListWithHeadersMixin):
+# only meant to fix data (used once due to a bug)
+class ConceptMultipleLatestVersionsView(BaseAPIView, ListWithHeadersMixin):  # pragma: no cover
     permission_classes = (IsAdminUser, )
 
     def get_serializer_class(self):

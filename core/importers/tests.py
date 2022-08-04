@@ -2,12 +2,13 @@ import json
 import os
 import unittest
 import uuid
+from json import JSONDecodeError
 
 from celery_once import AlreadyQueued
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.db.models import F
-from mock import patch, Mock, ANY, call
+from mock import patch, Mock, ANY, call, PropertyMock
 from ocldev.oclcsvtojsonconverter import OclStandardCsvToJsonConverter
 
 from core.collections.models import Collection
@@ -236,7 +237,8 @@ class BulkImportInlineTest(OCLTestCase):
         self.assertEqual(importer.failed, [])
         self.assertTrue(importer.elapsed_seconds > 0)
 
-    def test_concept_import(self):
+    @patch('core.importers.models.batch_index_resources')
+    def test_concept_import(self, batch_index_resources_mock):
         self.assertFalse(Concept.objects.filter(mnemonic='Food').exists())
 
         OrganizationSourceFactory(
@@ -282,6 +284,7 @@ class BulkImportInlineTest(OCLTestCase):
         self.assertEqual(len(importer.updated), 1)
         self.assertEqual(importer.failed, [])
         self.assertTrue(importer.elapsed_seconds > 0)
+        batch_index_resources_mock.apply_async.assert_called()
 
     def test_concept_import_permission_denied(self):
         self.assertFalse(Concept.objects.filter(mnemonic='Food').exists())
@@ -311,7 +314,8 @@ class BulkImportInlineTest(OCLTestCase):
         self.assertEqual(len(importer.updated), 0)
         self.assertEqual(importer.permission_denied, [data])
 
-    def test_mapping_import(self):
+    @patch('core.importers.models.batch_index_resources')
+    def test_mapping_import(self, batch_index_resources_mock):
         self.assertEqual(Mapping.objects.count(), 0)
 
         source = OrganizationSourceFactory(
@@ -360,8 +364,10 @@ class BulkImportInlineTest(OCLTestCase):
         self.assertEqual(len(importer.updated), 1)
         self.assertEqual(importer.failed, [])
         self.assertTrue(importer.elapsed_seconds > 0)
+        batch_index_resources_mock.apply_async.assert_called()
 
-    def test_reference_import(self):
+    @patch('core.importers.models.batch_index_resources')
+    def test_reference_import(self, batch_index_resources_mock):
         importer = BulkImportInline(
             open(
                 os.path.join(os.path.dirname(__file__), '..', 'samples/sample_collection_references.json'), 'r'
@@ -403,8 +409,10 @@ class BulkImportInlineTest(OCLTestCase):
         self.assertEqual(collection.expansion.concepts.count(), 4)
         self.assertEqual(collection.expansion.mappings.count(), 0)
         self.assertEqual(collection.references.count(), 4)
+        batch_index_resources_mock.apply_async.assert_called()
 
-    def test_sample_import(self):
+    @patch('core.importers.models.batch_index_resources')
+    def test_sample_import(self, batch_index_resources_mock):
         importer = BulkImportInline(
             open(
                 os.path.join(os.path.dirname(__file__), '..', 'samples/sample_ocldev.json'), 'r'
@@ -421,9 +429,36 @@ class BulkImportInlineTest(OCLTestCase):
         self.assertEqual(len(importer.invalid), 0)
         self.assertEqual(len(importer.others), 0)
         self.assertEqual(len(importer.permission_denied), 0)
+        batch_index_resources_mock.apply_async.assert_called()
 
-    @unittest.skip('[Skipped] OPENMRS CSV Import Sample')
-    def test_openmrs_schema_csv_import(self):
+    @patch('core.importers.models.batch_index_resources')
+    def test_csv_import_with_retired_concepts(self, batch_index_resources_mock):
+        file_content = open(
+            os.path.join(os.path.dirname(__file__), '..', 'samples/ocl_csv_with_retired_concepts.csv'), 'r').read()
+        data = OclStandardCsvToJsonConverter(
+            input_list=csv_file_data_to_input_list(file_content), allow_special_characters=True).process()
+        importer = BulkImportInline(data, 'ocladmin', True)
+        importer.run()
+
+        self.assertEqual(importer.processed, 10)
+        self.assertEqual(len(importer.created), 10)
+        self.assertEqual(len(importer.failed), 0)
+        self.assertEqual(len(importer.exists), 0)
+        self.assertEqual(len(importer.updated), 0)
+        self.assertEqual(len(importer.invalid), 0)
+        self.assertEqual(len(importer.others), 0)
+        self.assertEqual(len(importer.permission_denied), 0)
+        batch_index_resources_mock.apply_async.assert_called()
+
+        self.assertEqual(Concept.objects.filter(parent__mnemonic='MyDemoSource', is_latest_version=True).count(), 4)
+        self.assertEqual(
+            Concept.objects.filter(parent__mnemonic='MyDemoSource', is_latest_version=True, retired=True).count(), 1)
+        self.assertEqual(
+            Concept.objects.filter(parent__mnemonic='MyDemoSource', is_latest_version=True, retired=False).count(), 3)
+
+    @unittest.skip('[Skipped] Gets hung sometimes')
+    @patch('core.importers.models.batch_index_resources')
+    def test_openmrs_schema_csv_import(self, batch_index_resources_mock):
         call_command('import_lookup_values')
         org = OrganizationFactory(mnemonic='MSFOCP')
         OrganizationSourceFactory(
@@ -436,16 +471,17 @@ class BulkImportInlineTest(OCLTestCase):
         ).process()
         importer = BulkImportInline(data, 'ocladmin', True)
         importer.run()
-
         self.assertEqual(importer.processed, 31)
         self.assertEqual(len(importer.created), 21)
         self.assertEqual(len(importer.updated), 0)
         self.assertEqual(len(importer.invalid), 0)
         self.assertEqual(len(importer.failed), 10)
         self.assertEqual(len(importer.permission_denied), 0)
+        batch_index_resources_mock.apply_async.assert_called()
 
     @unittest.skip('[Skipped] PEPFAR (small) Import Sample')
-    def test_pepfar_import(self):
+    @patch('core.importers.models.batch_index_resources')
+    def test_pepfar_import(self, batch_index_resources_mock):
         importer = BulkImportInline(
             open(
                 os.path.join(os.path.dirname(__file__), '..', 'samples/pepfar_datim_moh_fy19.json'), 'r').read(),
@@ -461,9 +497,20 @@ class BulkImportInlineTest(OCLTestCase):
         self.assertEqual(len(importer.invalid), 0)
         self.assertEqual(len(importer.others), 0)
         self.assertEqual(len(importer.permission_denied), 0)
+        batch_index_resources_mock.apply_async.assert_called()
 
 
 class BulkImportParallelRunnerTest(OCLTestCase):
+    def test_invalid_json(self):
+        with self.assertRaises(JSONDecodeError) as ex:
+            BulkImportParallelRunner(
+                open(
+                    os.path.join(os.path.dirname(__file__), '..', 'samples/invalid_import_json.json'), 'r'
+                ).read(),
+                'ocladmin', True
+            )
+        self.assertEqual(ex.exception.msg, 'Expecting property name enclosed in double quotes')
+
     @patch('core.importers.models.RedisService')
     def test_make_parts(self, redis_service_mock):
         redis_service_mock.return_value = Mock()
@@ -561,7 +608,7 @@ class BulkImportParallelRunnerTest(OCLTestCase):
         self.assertTrue(importer.elapsed_seconds > 0)
 
     @patch('core.importers.models.RedisService')
-    def test_notify_progress(self, redis_service_mock):  # pylint: disable=no-self-use
+    def test_notify_progress(self, redis_service_mock):
         redis_instance_mock = Mock(set_json=Mock())
         redis_service_mock.return_value = redis_instance_mock
         importer = BulkImportParallelRunner(
@@ -586,13 +633,93 @@ class BulkImportParallelRunnerTest(OCLTestCase):
 
     def test_chunker_list(self):
         self.assertEqual(
-            list(BulkImportParallelRunner.chunker_list([1, 2, 3], 3)), [[1], [2], [3]]
+            list(BulkImportParallelRunner.chunker_list([1, 2, 3], 3, False)), [[1], [2], [3]]
         )
         self.assertEqual(
-            list(BulkImportParallelRunner.chunker_list([1, 2, 3], 2)), [[1, 3], [2]]
+            list(BulkImportParallelRunner.chunker_list([1, 2, 3], 2, False)), [[1, 2], [3]]
         )
         self.assertEqual(
-            list(BulkImportParallelRunner.chunker_list([1, 2, 3], 1)), [[1, 2, 3]]
+            list(BulkImportParallelRunner.chunker_list([1, 2, 3], 1, False)), [[1, 2, 3]]
+        )
+
+        concepts = [
+            {"type": "Concept", "id": "A", "update_comment": "A.1"},
+            {"type": "Concept", "id": "B", "update_comment": "B.1"},
+            {"type": "Concept", "id": "A", "update_comment": "A.2"},
+            {"type": "Concept", "id": "C", "update_comment": "C.1"},
+            {"type": "Concept", "id": "B", "update_comment": "B.2"},
+            {"type": "Concept", "id": "B", "update_comment": "B.3"},
+            {"type": "Concept", "id": "A", "update_comment": "A.3"}
+        ]
+
+        self.assertEqual(
+            list(BulkImportParallelRunner.chunker_list(concepts, 1, True)),
+            [
+                [
+                    {"type": "Concept", "id": "A", "update_comment": "A.1"},
+                    {"type": "Concept", "id": "A", "update_comment": "A.2"},
+                    {"type": "Concept", "id": "A", "update_comment": "A.3"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.1"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.2"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.3"},
+                    {"type": "Concept", "id": "C", "update_comment": "C.1"},
+                ],
+            ]
+        )
+
+        self.assertEqual(
+            list(BulkImportParallelRunner.chunker_list(concepts, 2, True)),
+            [
+                [
+                    {"type": "Concept", "id": "A", "update_comment": "A.1"},
+                    {"type": "Concept", "id": "A", "update_comment": "A.2"},
+                    {"type": "Concept", "id": "A", "update_comment": "A.3"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.1"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.2"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.3"},
+                ],
+                [
+                    {"type": "Concept", "id": "C", "update_comment": "C.1"},
+                ]
+            ]
+        )
+
+        self.assertEqual(
+            list(BulkImportParallelRunner.chunker_list(concepts, 3, True)),
+            [
+                [
+                    {"type": "Concept", "id": "A", "update_comment": "A.1"},
+                    {"type": "Concept", "id": "A", "update_comment": "A.2"},
+                    {"type": "Concept", "id": "A", "update_comment": "A.3"},
+                ],
+                [
+                    {"type": "Concept", "id": "B", "update_comment": "B.1"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.2"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.3"},
+                ],
+                [
+                    {"type": "Concept", "id": "C", "update_comment": "C.1"},
+                ]
+            ]
+        )
+
+        self.assertEqual(
+            list(BulkImportParallelRunner.chunker_list(concepts, 5, True)),
+            [
+                [
+                    {"type": "Concept", "id": "A", "update_comment": "A.1"},
+                    {"type": "Concept", "id": "A", "update_comment": "A.2"},
+                    {"type": "Concept", "id": "A", "update_comment": "A.3"},
+                ],
+                [
+                    {"type": "Concept", "id": "B", "update_comment": "B.1"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.2"},
+                    {"type": "Concept", "id": "B", "update_comment": "B.3"},
+                ],
+                [
+                    {"type": "Concept", "id": "C", "update_comment": "C.1"},
+                ]
+            ]
         )
 
 
@@ -750,6 +877,23 @@ class BulkImportViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.data, dict(task=task_id, state='PENDING', username='foobar', queue='normal'))
 
+    @patch('core.importers.views.flower_get')
+    def test_get_flower_failed(self, flower_get_mock):
+        flower_get_mock.side_effect = Exception('Service Down')
+
+        response = self.client.get(
+            '/importers/bulk-import/?username=ocladmin',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.data,
+            dict(detail='Flower service returned unexpected result. Maybe check healthcheck.',
+                 exception=str('Service Down'))
+        )
+
     def test_post_400(self):
         response = self.client.post(
             '/importers/bulk-import/?update_if_exists=1',
@@ -890,3 +1034,104 @@ class BulkImportViewTest(OCLAPITestCase):
         self.assertEqual(bulk_import_mock.apply_async.call_args[0], (('{"key": "value"}', 'ocladmin', True),))
         self.assertEqual(bulk_import_mock.apply_async.call_args[1]['task_id'][37:], 'ocladmin~priority')
         self.assertEqual(bulk_import_mock.apply_async.call_args[1]['queue'], 'bulk_import_root')
+
+    @patch('core.importers.views.QueueOnce.once_backend', new_callable=PropertyMock)
+    @patch('core.importers.views.AsyncResult')
+    @patch('core.importers.views.app')
+    def test_delete_parallel_import_204(self, celery_app_mock, async_result_mock, queue_once_backend_mock):
+        clear_lock_mock = Mock()
+        queue_once_backend_mock.return_value = Mock(clear_lock=clear_lock_mock)
+        result_mock = Mock(
+            args=['content', 'ocladmin', True, 5]  # content, username, update_if_exists, threads
+        )
+        result_mock.name = 'core.common.tasks.bulk_import_parallel_inline'
+        async_result_mock.return_value = result_mock
+        task_id = 'ace5abf4-3b7f-4e4a-b16f-d1c041088c3e-ocladmin~priority'
+        response = self.client.delete(
+            "/importers/bulk-import/",
+            {'task_id': task_id},
+            HTTP_AUTHORIZATION='Token ' + self.token,
+        )
+
+        self.assertEqual(response.status_code, 204)
+        celery_app_mock.control.revoke.assert_called_once_with(task_id, terminate=True, signal='SIGKILL')
+        self.assertTrue(clear_lock_mock.call_args[0][0].endswith(
+            'core.common.tasks.bulk_import_parallel_inline_threads-5_to_import-content_update_if_exists-True_username-ocladmin'  # pylint: disable=line-too-long
+        ))
+
+    @patch('core.importers.views.QueueOnce.once_backend', new_callable=PropertyMock)
+    @patch('core.importers.views.AsyncResult')
+    @patch('core.importers.views.app')
+    def test_delete_204(self, celery_app_mock, async_result_mock, queue_once_backend_mock):
+        clear_lock_mock = Mock()
+        queue_once_backend_mock.return_value = Mock(clear_lock=clear_lock_mock)
+        result_mock = Mock(
+            args=['content', 'ocladmin', True]  # content, username, update_if_exists
+        )
+        result_mock.name = 'core.common.tasks.bulk_import'
+        async_result_mock.return_value = result_mock
+        task_id = 'ace5abf4-3b7f-4e4a-b16f-d1c041088c3e-ocladmin~priority'
+        response = self.client.delete(
+            "/importers/bulk-import/",
+            {'task_id': task_id, 'signal': 'SIGTERM'},
+            HTTP_AUTHORIZATION='Token ' + self.token,
+        )
+
+        self.assertEqual(response.status_code, 204)
+        celery_app_mock.control.revoke.assert_called_once_with(task_id, terminate=True, signal='SIGTERM')
+        self.assertTrue(clear_lock_mock.call_args[0][0].endswith(
+            'core.common.tasks.bulk_import_to_import-content_update_if_exists-True_username-ocladmin'
+        ))
+
+    @patch('core.importers.views.AsyncResult')
+    @patch('core.importers.views.app')
+    def test_delete_400(self, celery_app_mock, async_result_mock):
+        response = self.client.delete(
+            "/importers/bulk-import/",
+            {'task_id': ''},
+            HTTP_AUTHORIZATION='Token ' + self.token,
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+        result_mock = Mock(
+            args=['content', 'ocladmin', True]  # content, username, update_if_exists
+        )
+        result_mock.name = 'core.common.tasks.bulk_import'
+        async_result_mock.return_value = result_mock
+
+        task_id = 'ace5abf4-3b7f-4e4a-b16f-d1c041088c3e-ocladmin~priority'
+        celery_app_mock.control.revoke.side_effect = Exception('foobar')
+        response = self.client.delete(
+            "/importers/bulk-import/",
+            {'task_id': task_id, 'signal': 'SIGKILL'},
+            HTTP_AUTHORIZATION='Token ' + self.token,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data, dict(errors=('foobar',)))
+        celery_app_mock.control.revoke.assert_called_once_with(task_id, terminate=True, signal='SIGKILL')
+
+    @patch('core.importers.views.AsyncResult')
+    def test_delete_403(self, async_result_mock):
+        random_user = UserProfileFactory(username='random_user')
+        response = self.client.delete(
+            "/importers/bulk-import/",
+            {'task_id': ''},
+            HTTP_AUTHORIZATION='Token ' + self.token,
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+        async_result_mock.return_value = Mock(
+            args=['content', 'ocladmin', True]  # content, username, update_if_exists
+        )
+
+        task_id = 'ace5abf4-3b7f-4e4a-b16f-d1c041088c3e-ocladmin~priority'
+        response = self.client.delete(
+            "/importers/bulk-import/",
+            {'task_id': task_id, 'signal': 'SIGKILL'},
+            HTTP_AUTHORIZATION='Token ' + random_user.get_token(),
+        )
+
+        self.assertEqual(response.status_code, 403)

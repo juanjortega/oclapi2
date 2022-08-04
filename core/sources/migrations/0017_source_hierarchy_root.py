@@ -8,6 +8,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('sources', '0016_auto_20210402_0419'),
+        ('concepts', '0001_initial'),
     ]
 
     operations = [
