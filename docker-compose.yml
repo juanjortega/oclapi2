@@ -2,7 +2,7 @@ version: '3'
 
 services:
   db:
-    image: postgres:12.3-alpine
+    image: postgres:14.2-alpine
     restart: "always"
     shm_size: "128mb"
     volumes:
@@ -11,6 +11,8 @@ services:
       - POSTGRES_PASSWORD=${DB_PASSWORD-Postgres123}
     healthcheck:
       test: "pg_isready -U postgres"
+    volumes:
+      - postgres-data:/usr/share/postgres/data
   redis:
     image: redis:6.0.6-alpine
     restart: "always"
@@ -218,7 +220,7 @@ services:
     healthcheck:
       test: "curl --silent --fail -u $${FLOWER_USER:-root}:$${FLOWER_PASSWORD:-Root123} http://localhost:5555/metrics || exit 1"
   es:
-    image: elasticsearch:7.8.1
+    image: elasticsearch:7.17.1
     environment:
       - discovery.type=single-node
       - bootstrap.memory_lock=true
@@ -229,6 +231,7 @@ services:
         hard: -1
     ports:
       - 9200:9200
+    user: "1000:1000"
     volumes:
       - ./es-data/data:/usr/share/elasticsearch/data
     restart: "always"

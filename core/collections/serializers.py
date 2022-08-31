@@ -1,9 +1,10 @@
+from datetime import datetime
 from django.core.validators import RegexValidator
 from pydash import get
 from rest_framework.fields import CharField, ChoiceField, ListField, IntegerField, DateTimeField, JSONField, \
     BooleanField, SerializerMethodField
 from rest_framework.relations import PrimaryKeyRelatedField
-from rest_framework.serializers import ModelSerializer
+from rest_framework.serializers import ModelSerializer, Serializer
 
 from core.client_configs.serializers import ClientConfigSerializer
 from core.collections.constants import INCLUDE_REFERENCES_PARAM
@@ -12,7 +13,16 @@ from core.common.constants import HEAD, DEFAULT_ACCESS_TYPE, NAMESPACE_REGEX, AC
     INCLUDE_CLIENT_CONFIGS, INVALID_EXPANSION_URL
 from core.orgs.models import Organization
 from core.settings import DEFAULT_LOCALE
+from core.sources.serializers import SourceVersionListSerializer
 from core.users.models import UserProfile
+
+
+class CollectionMinimalSerializer(ModelSerializer):
+    id = CharField(source='mnemonic')
+
+    class Meta:
+        model = Collection
+        fields = ('id', 'url')
 
 
 class CollectionListSerializer(ModelSerializer):
@@ -31,6 +41,7 @@ class CollectionListSerializer(ModelSerializer):
 
 
 class CollectionVersionListSerializer(ModelSerializer):
+    type = CharField(source='resource_version_type')
     short_code = CharField(source='mnemonic')
     owner = CharField(source='parent_resource')
     owner_type = CharField(source='parent_resource_type')
@@ -45,13 +56,15 @@ class CollectionVersionListSerializer(ModelSerializer):
     class Meta:
         model = Collection
         fields = (
-            'short_code', 'name', 'url', 'owner', 'owner_type', 'owner_url', 'version', 'created_at', 'id',
-            'collection_type', 'updated_at', 'canonical_url', 'released', 'retired', 'version_url',
+            'type', 'short_code', 'name', 'url', 'canonical_url', 'owner', 'owner_type', 'owner_url', 'version',
+            'created_at', 'id', 'collection_type', 'updated_at', 'released', 'retired', 'version_url',
             'previous_version_url', 'autoexpand', 'expansion_url',
         )
 
 
 class CollectionCreateOrUpdateSerializer(ModelSerializer):
+    canonical_url = CharField(allow_blank=True, allow_null=True, required=False)
+
     class Meta:
         model = Collection
         lookup_field = 'mnemonic'
@@ -170,12 +183,6 @@ class ExpansionSummarySerializer(ModelSerializer):
     class Meta:
         model = Expansion
         fields = ('active_concepts', 'active_mappings')
-
-
-class ExpansionSummaryDetailSerializer(ExpansionSummarySerializer):
-    class Meta:
-        model = Expansion
-        fields = ExpansionSummarySerializer.Meta.fields + ('id', 'mnemonic')
 
 
 class CollectionSummarySerializer(ModelSerializer):
@@ -356,17 +363,24 @@ class CollectionVersionDetailSerializer(CollectionCreateOrUpdateSerializer):
 
 class CollectionReferenceSerializer(ModelSerializer):
     reference_type = CharField(read_only=True)
+    uuid = CharField(source='id', read_only=True)
+    type = CharField(source='resource_type', read_only=True)
 
     class Meta:
         model = CollectionReference
-        fields = ('expression', 'reference_type', 'id', 'last_resolved_at')
+        fields = ('expression', 'reference_type', 'id', 'last_resolved_at', 'uri', 'uuid', 'include', 'type')
 
 
 class CollectionReferenceDetailSerializer(CollectionReferenceSerializer):
+    concepts = IntegerField(source='concepts_count', read_only=True)
+    mappings = IntegerField(source='mappings_count', read_only=True)
+
     class Meta:
         model = CollectionReference
         fields = (
-            *CollectionReferenceSerializer.Meta.fields, 'last_resolved_at', 'created_at', 'updated_at',
+            *CollectionReferenceSerializer.Meta.fields,
+            'code', 'resource_version', 'namespace', 'system', 'version', 'valueset', 'cascade', 'filter', 'display',
+            'created_at', 'updated_at', 'concepts', 'mappings'
         )
 
 
@@ -387,7 +401,9 @@ class ExpansionSerializer(ModelSerializer):
 
     class Meta:
         model = Expansion
-        fields = ('mnemonic', 'id', 'parameters', 'canonical_url', 'url', 'summary')
+        fields = (
+            'mnemonic', 'id', 'parameters', 'canonical_url', 'url', 'summary', 'is_processing',
+        )
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
@@ -419,10 +435,15 @@ class ExpansionDetailSerializer(ModelSerializer):
     parameters = JSONField()
     created_on = DateTimeField(source='created_at', read_only=True)
     created_by = DateTimeField(source='created_by.username', read_only=True)
+    resolved_collection_versions = CollectionVersionListSerializer(many=True, read_only=True)
+    resolved_source_versions = SourceVersionListSerializer(many=True, read_only=True)
 
     class Meta:
         model = Expansion
-        fields = ('mnemonic', 'id', 'parameters', 'canonical_url', 'url', 'summary', 'created_on', 'created_by')
+        fields = (
+            'mnemonic', 'id', 'parameters', 'canonical_url', 'url', 'summary', 'created_on', 'created_by',
+            'is_processing', 'resolved_collection_versions', 'resolved_source_versions'
+        )
 
     def __init__(self, *args, **kwargs):
         params = get(kwargs, 'context.request.query_params')
@@ -446,3 +467,26 @@ class ExpansionDetailSerializer(ModelSerializer):
             summary = ExpansionSummarySerializer(obj).data
 
         return summary
+
+
+class ReferenceExpressionResolveSerializer(Serializer):  # pylint: disable=abstract-method
+    reference_type = SerializerMethodField()
+    resolved = SerializerMethodField()
+    timestamp = SerializerMethodField()
+
+    class Meta:
+        fields = (
+            'reference_type', 'resolved', 'timestamp'
+        )
+
+    @staticmethod
+    def get_reference_type(obj):
+        return 'canonical' if get(obj, 'is_fqdn') else 'relative'
+
+    @staticmethod
+    def get_resolved(obj):
+        return bool(obj.id)
+
+    @staticmethod
+    def get_timestamp(_):
+        return datetime.now()

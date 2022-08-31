@@ -3,13 +3,13 @@ import uuid
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models, IntegrityError, transaction
-from django.db.models import Q
-from pydash import get, compact
+from django.db.models import Q, F
+from pydash import get
 
-from core.common.constants import INCLUDE_RETIRED_PARAM, NAMESPACE_REGEX, HEAD, LATEST
+from core.common.constants import NAMESPACE_REGEX, HEAD, LATEST
 from core.common.mixins import SourceChildMixin
 from core.common.models import VersionedModel
-from core.common.utils import parse_updated_since_param, separate_version, to_parent_uri, generate_temp_version, \
+from core.common.utils import separate_version, to_parent_uri, generate_temp_version, \
     encode_string, is_url_encoded_string
 from core.mappings.constants import MAPPING_TYPE, MAPPING_IS_ALREADY_RETIRED, MAPPING_WAS_RETIRED, \
     MAPPING_IS_ALREADY_NOT_RETIRED, MAPPING_WAS_UNRETIRED, PERSIST_CLONE_ERROR, PERSIST_CLONE_SPECIFY_USER_ERROR, \
@@ -25,9 +25,41 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
                       models.Index(name='mappings_updated_4589ad_idx', fields=['-updated_at'],
                                    condition=(Q(is_active=True) & Q(retired=False) & Q(is_latest_version=True) &
                                               ~Q(public_access='None'))),
+                      models.Index(name='mappings_ver_updated_at_idx', fields=['-updated_at'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & ~Q(public_access='None'))),
+                      models.Index(name='mappings_vers_updated_idx', fields=['-updated_at'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(id=F('versioned_object_id')) &
+                                              ~Q(public_access='None'))),
                       models.Index(name='mappings_public_conditional', fields=['public_access'],
                                    condition=(Q(is_active=True) & Q(retired=False) & Q(is_latest_version=True) &
                                               ~Q(public_access='None'))),
+                      models.Index(name='mappings_ver_public', fields=['public_access'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & ~Q(public_access='None'))),
+                      models.Index(name='mappings_ver_public_cond', fields=['public_access'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(id=F('versioned_object_id')) &
+                                              ~Q(public_access='None'))),
+                      models.Index(name='mappings_public_cond2', fields=['parent_id'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(is_latest_version=True) &
+                                              ~Q(public_access='None'))),
+                      models.Index(name='mappings_ver_public_cond2', fields=['parent_id'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(id=F('versioned_object_id')) &
+                                              ~Q(public_access='None'))),
+                      models.Index(name='mappings_all_for_count', fields=['is_active'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(is_latest_version=True))),
+                      models.Index(name='mappings_ver_for_count', fields=['is_active'],
+                                   condition=(Q(is_active=True) & Q(retired=False))),
+                      models.Index(name='mappings_ver_all_for_count', fields=['is_active'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(id=F('versioned_object_id')))),
+                      models.Index(name='mappings_all_for_count2', fields=['parent_id'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(is_latest_version=True))),
+                      models.Index(name='mappings_ver_all_for_count2', fields=['parent_id'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(id=F('versioned_object_id')))),
+                      models.Index(name='mappings_all_for_sort', fields=['-updated_at'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(is_latest_version=True))),
+                      models.Index(name='mappings_ver_for_sort', fields=['-updated_at'],
+                                   condition=(Q(is_active=True) & Q(retired=False))),
+                      models.Index(name='mappings_ver_all_for_sort', fields=['-updated_at'],
+                                   condition=(Q(is_active=True) & Q(retired=False) & Q(id=F('versioned_object_id')))),
                   ] + VersionedModel.Meta.indexes
 
     parent = models.ForeignKey('sources.Source', related_name='mappings_set', on_delete=models.CASCADE)
@@ -66,6 +98,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
     to_source_url = models.TextField(null=True, blank=True, db_index=True)
     to_source_version = models.TextField(null=True, blank=True)
     _counted = models.BooleanField(default=True, null=True, blank=True)
+    _index = models.BooleanField(default=True)
 
     logo_path = None
     name = None
@@ -235,6 +268,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
             from_source_id=self.from_source_id,
             from_source_url=self.from_source_url,
             from_source_version=self.from_source_version,
+            _index=self._index
         )
         if user:
             mapping.created_by = mapping.updated_by = user
@@ -244,6 +278,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
     @classmethod
     def create_initial_version(cls, mapping, **kwargs):
         initial_version = mapping.clone()
+        initial_version.comment = mapping.comment
         initial_version.save(**kwargs)
         initial_version.version = initial_version.id
         initial_version.released = False
@@ -318,13 +353,14 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         self.to_source_version, self.to_source_url = get_source_info(
             to_source_url, to_concept_url, self.to_source_version, to_concept
         )
-
-        self.to_source = Source.objects.filter(
-            models.Q(uri=self.to_source_url) | models.Q(canonical_url=self.to_source_url)
-        ).filter(version=HEAD).first()
-        self.from_source = Source.objects.filter(
-            models.Q(uri=self.from_source_url) | models.Q(canonical_url=self.from_source_url)
-        ).filter(version=HEAD).first()
+        if self.to_source_url:
+            self.to_source = Source.objects.filter(
+                models.Q(uri=self.to_source_url) | models.Q(canonical_url=self.to_source_url)
+            ).filter(version=HEAD).first()
+        if self.from_source_url:
+            self.from_source = Source.objects.filter(
+                models.Q(uri=self.from_source_url) | models.Q(canonical_url=self.from_source_url)
+            ).filter(version=HEAD).first()
 
     def is_existing_in_parent(self):
         return self.parent.mappings_set.filter(mnemonic__exact=self.mnemonic).exists()
@@ -364,15 +400,16 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
             mapping.versioned_object_id = mapping.id
             mapping.version = str(mapping.id)
             mapping.is_latest_version = False
-            if mapping.mnemonic == temp_version:
-                mapping.mnemonic = str(mapping.id)
             parent = mapping.parent
-            parent_head = parent.head
+            if mapping.mnemonic == temp_version:
+                mapping.mnemonic = parent.mapping_mnemonic_next or str(mapping.id)
+            if not mapping.external_id:
+                mapping.external_id = parent.mapping_external_id_next
             mapping.public_access = parent.public_access
             mapping.save()
             initial_version = cls.create_initial_version(mapping)
-            initial_version.sources.set([parent, parent_head])
-            mapping.sources.set([parent, parent_head])
+            initial_version.sources.set([parent])
+            mapping.sources.set([parent])
             if mapping._counted is True:
                 parent.update_mappings_count()
         except ValidationError as ex:
@@ -415,7 +452,6 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         obj.created_by = user
         obj.updated_by = user
         parent = obj.parent
-        parent_head = parent.head
         persisted = False
         prev_latest_version = cls.objects.filter(
             versioned_object_id=obj.versioned_object_id, is_latest_version=True).first()
@@ -431,16 +467,19 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
                     obj.update_versioned_object()
                     if prev_latest_version:
                         prev_latest_version.is_latest_version = False
-                        prev_latest_version.save(update_fields=['is_latest_version'])
+                        prev_latest_version._index = obj._index  # pylint: disable=protected-access
+                        prev_latest_version.save(update_fields=['is_latest_version', '_index'])
+                        prev_latest_version.sources.remove(parent)
 
-                    obj.sources.set(compact([parent, parent_head]))
+                    obj.sources.set([parent])
                     persisted = True
                     cls.resume_indexing()
 
                     def index_all():
-                        if prev_latest_version:
-                            prev_latest_version.index()
-                        obj.index()
+                        if obj._index:  # pylint: disable=protected-access
+                            if prev_latest_version:
+                                prev_latest_version.index()
+                            obj.index()
 
                     transaction.on_commit(index_all)
         except ValidationError as err:
@@ -449,10 +488,11 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
             cls.resume_indexing()
             if not persisted:
                 if obj.id:
-                    obj.sources.remove(parent_head)
                     if prev_latest_version:
+                        prev_latest_version._index = True  # pylint: disable=protected-access
                         prev_latest_version.is_latest_version = True
-                        prev_latest_version.save(update_fields=['is_latest_version'])
+                        prev_latest_version.save(update_fields=['is_latest_version', '_index'])
+                        prev_latest_version.sources.add(parent)
                     obj.delete()
                 errors['non_field_errors'] = [PERSIST_CLONE_ERROR]
 
@@ -468,9 +508,6 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         container_version = params.get('version', None)
         mapping = params.get('mapping', None)
         mapping_version = params.get('mapping_version', None)
-        is_latest = params.get('is_latest', None) in [True, 'true']
-        include_retired = params.get(INCLUDE_RETIRED_PARAM, None) in [True, 'true']
-        updated_since = parse_updated_since_param(params)
         latest_released_version = None
         is_latest_released = container_version == LATEST
         if is_latest_released:
@@ -490,7 +527,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
         if collection:
             queryset = queryset.filter(
                 cls.get_filter_by_container_criterion(
-                    'collection_set', collection, org, user, container_version,
+                    'expansion_set__collection_version', collection, org, user, container_version,
                     is_latest_released, latest_released_version,
                 )
             )
@@ -498,7 +535,7 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
             queryset = queryset.filter(
                 cls.get_filter_by_container_criterion(
                     'sources', source, org, user, container_version,
-                    is_latest_released, latest_released_version
+                    is_latest_released, latest_released_version, 'parent'
                 )
             )
 
@@ -506,17 +543,8 @@ class Mapping(MappingValidationMixin, SourceChildMixin, VersionedModel):
             queryset = queryset.filter(mnemonic__exact=mapping)
         if mapping_version:
             queryset = queryset.filter(version=mapping_version)
-        if is_latest:
-            queryset = queryset.filter(is_latest_version=True)
-        if not include_retired and not mapping:
-            queryset = queryset.filter(retired=False)
-        if updated_since:
-            queryset = queryset.filter(updated_at__gte=updated_since)
 
-        return queryset
-
-    def is_from_same_as_to(self):
-        return self.from_concept_code == self.to_concept_code and self.from_source_url == self.to_source_url
+        return cls.apply_attribute_based_filters(queryset, params)
 
     @staticmethod
     def get_serializer_class(verbose=False, version=False, brief=False, reverse=False):

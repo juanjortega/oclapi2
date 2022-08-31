@@ -29,12 +29,17 @@ The new and improved OCL terminology service v2
 
     or
 
+    `docker exec -it oclapi2_api_1  python manage.py test --keepdb -v3 -- core.sources.tests.tests.SourceTest` 
+
+    or
+
     `docker-compose -f docker-compose.yml -f docker-compose.ci.yml run --rm api python manage.py test --keepdb -v3`
 
 ### Build image
 
 
 #### Crear archivo .env
+API_SUPERUSER_PASSWORD corresponde al password del usuario ocladmin.
 
 ```conf
 ENVIRONMENT=development|production
@@ -72,6 +77,20 @@ After modifying model you need to create migration files. Run:
 
 Make sure to commit newly created migration files.
 
+### Debugging
+
+In order to debug tests or api you can use PDB. Set a breakpoint in code with:
+
+`import pdb; pdb.set_trace()`
+
+Run tests with:
+
+`docker-compose run --rm api python manage.py test core.code_systems --keepdb -v3`
+
+Run api with:
+
+`docker-compose run --rm --service-ports api`
+
 ### Release
 
 Every build is a candidate for release.
@@ -81,6 +100,10 @@ that the maintenance version will be automatically increased after a successful 
 should be turned off by setting the increaseMaintenanceRelease variable to false on the Run stage "Release" popup in other cases.
 
 A deployment release will be automatically created and pushed to the staging environment.
+
+#### Major/minor version increase
+
+In order to increase major/minor version you need to set the new version in [core/\_\_init\_\_.py](core/__init__.py). Alongside you need to login to our CI and update the next release version on a deployment plan [here](https://ci.openmrs.org/deploy/config/configureDeploymentProjectVersioning.action?id=205619201) with the same value.
 
 ### Deployment
 

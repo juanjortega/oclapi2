@@ -14,6 +14,14 @@ from core.sources.models import Source
 from core.users.models import UserProfile
 
 
+class SourceMinimalSerializer(ModelSerializer):
+    id = CharField(source='mnemonic')
+
+    class Meta:
+        model = Source
+        fields = ('id', 'url')
+
+
 class SourceListSerializer(ModelSerializer):
     short_code = CharField(source='mnemonic')
     owner = CharField(source='parent_resource')
@@ -30,6 +38,7 @@ class SourceListSerializer(ModelSerializer):
 
 
 class SourceVersionListSerializer(ModelSerializer):
+    type = CharField(source='resource_version_type')
     short_code = CharField(source='mnemonic')
     owner = CharField(source='parent_resource')
     owner_type = CharField(source='parent_resource_type')
@@ -42,12 +51,15 @@ class SourceVersionListSerializer(ModelSerializer):
     class Meta:
         model = Source
         fields = (
-            'short_code', 'name', 'url', 'owner', 'owner_type', 'owner_url', 'version', 'created_at', 'id',
-            'source_type', 'updated_at', 'canonical_url', 'released', 'retired', 'version_url', 'previous_version_url'
+            'type', 'short_code', 'name', 'url', 'canonical_url', 'owner', 'owner_type', 'owner_url', 'version',
+            'created_at', 'id', 'source_type', 'updated_at', 'released', 'retired', 'version_url',
+            'previous_version_url'
         )
 
 
 class SourceCreateOrUpdateSerializer(ModelSerializer):
+    canonical_url = CharField(allow_blank=True, allow_null=True, required=False)
+
     class Meta:
         model = Source
         lookup_field = 'mnemonic'
@@ -76,6 +88,10 @@ class SourceCreateOrUpdateSerializer(ModelSerializer):
                 'experimental', 'case_sensitive', 'collection_reference', 'hierarchy_meaning', 'compositional',
                 'version_needed', 'canonical_url', 'identifier', 'publisher', 'contact', 'jurisdiction', 'purpose',
                 'copyright', 'content_type', 'revision_date', 'text', 'meta',
+                'autoid_concept_mnemonic', 'autoid_concept_external_id',
+                'autoid_mapping_mnemonic', 'autoid_mapping_external_id',
+                'autoid_concept_mnemonic_start_from', 'autoid_concept_external_id_start_from',
+                'autoid_mapping_mnemonic_start_from', 'autoid_mapping_external_id_start_from',
         ]:
             setattr(source, attr, validated_data.get(attr, get(source, attr)))
 
@@ -87,7 +103,6 @@ class SourceCreateOrUpdateSerializer(ModelSerializer):
             from core.concepts.models import Concept
             source.hierarchy_root = Concept.objects.filter(
                 uri=hierarchy_root_url).first() if hierarchy_root_url else None
-
         return source
 
     def update(self, instance, validated_data):
@@ -223,13 +238,16 @@ class SourceDetailSerializer(SourceCreateOrUpdateSerializer):
         fields = (
             'type', 'uuid', 'id', 'short_code', 'name', 'full_name', 'description', 'source_type',
             'custom_validation_schema', 'public_access', 'default_locale', 'supported_locales', 'website',
-            'url', 'owner', 'owner_type', 'owner_url',
-            'created_on', 'updated_on', 'created_by', 'updated_by', 'extras', 'external_id', 'versions_url',
-            'version', 'concepts_url', 'mappings_url',
+            'url', 'owner', 'owner_type', 'owner_url', 'created_on', 'updated_on', 'created_by', 'updated_by',
+            'extras', 'external_id', 'versions_url', 'version', 'concepts_url', 'mappings_url',
             'canonical_url', 'identifier', 'publisher', 'contact', 'jurisdiction', 'purpose', 'copyright',
             'content_type', 'revision_date', 'logo_url', 'summary', 'text', 'client_configs',
             'experimental', 'case_sensitive', 'collection_reference', 'hierarchy_meaning', 'compositional',
-            'version_needed', 'hierarchy_root_url', 'hierarchy_root', 'meta'
+            'version_needed', 'hierarchy_root_url', 'hierarchy_root', 'meta',
+            'autoid_concept_mnemonic', 'autoid_concept_external_id',
+            'autoid_mapping_mnemonic', 'autoid_mapping_external_id',
+            'autoid_concept_mnemonic_start_from', 'autoid_concept_external_id_start_from',
+            'autoid_mapping_mnemonic_start_from', 'autoid_mapping_external_id_start_from',
         )
 
     def __init__(self, *args, **kwargs):

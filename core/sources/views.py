@@ -34,7 +34,7 @@ from core.sources.search import SourceSearch
 from core.sources.serializers import (
     SourceDetailSerializer, SourceListSerializer, SourceCreateSerializer, SourceVersionDetailSerializer,
     SourceVersionListSerializer, SourceVersionExportSerializer, SourceSummaryDetailSerializer,
-    SourceVersionSummaryDetailSerializer)
+    SourceVersionSummaryDetailSerializer, SourceMinimalSerializer)
 
 logger = logging.getLogger('oclapi')
 
@@ -56,8 +56,7 @@ class SourceBaseView(BaseAPIView):
             elif not has_owner_scope:
                 raise Http404()
 
-    @staticmethod
-    def get_detail_serializer(obj):
+    def get_detail_serializer(self, obj):
         return SourceDetailSerializer(obj)
 
     def get_filter_params(self, default_version_to_head=True):
@@ -98,8 +97,12 @@ class SourceListView(SourceBaseView, ConceptDictionaryCreateMixin, ListWithHeade
     facet_class = SourceSearch
     default_filters = dict(is_active=True, version=HEAD)
 
+    def apply_filters(self, queryset):
+        return queryset
+
     def get_queryset(self):
         queryset = super().get_queryset()
+        queryset = self.apply_filters(queryset)
         user = self.request.user
         if get(user, 'is_staff'):
             return queryset
@@ -112,6 +115,8 @@ class SourceListView(SourceBaseView, ConceptDictionaryCreateMixin, ListWithHeade
         return public_queryset.union(private_queryset)
 
     def get_serializer_class(self):
+        if self.is_brief():
+            return SourceMinimalSerializer
         if self.request.method == 'GET' and self.is_verbose():
             return SourceDetailSerializer
         if self.request.method == 'POST':
@@ -498,5 +503,5 @@ class SourceLatestVersionSummaryView(SourceVersionBaseView, RetrieveAPIView, Upd
 class SourceClientConfigsView(SourceBaseView, ResourceClientConfigsView):
     lookup_field = 'source'
     model = Source
-    queryset = Source.objects.filter(is_active=True, version='HEAD')
+    queryset = Source.objects.filter(is_active=True, version=HEAD)
     permission_classes = (CanViewConceptDictionary, )

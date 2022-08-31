@@ -45,7 +45,7 @@ class MappingListViewTest(OCLAPITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data), 0)
 
-        collection.add_references(expressions=[mapping.uri])
+        collection.add_expressions(dict(expressions=[mapping.uri]), collection.created_by)
 
         response = self.client.get(collection.mappings_url, format='json')
 
@@ -359,6 +359,24 @@ class MappingListViewTest(OCLAPITestCase):
         self.assertEqual(mapping.to_source, concept.parent)
         self.assertEqual(mapping.to_concept, concept)
 
+        response = self.client.post(
+            source.mappings_url,
+            {
+                "map_type": "Same As",
+                "from_concept_code": "foo",
+                "from_concept_name": "foo",
+                "to_concept_code": "bar",
+                "to_concept_name": "bar"
+            },
+            HTTP_AUTHORIZATION='Token ' + self.token,
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['from_concept_code'], 'foo')
+        self.assertEqual(response.data['from_concept_name'], 'foo')
+        self.assertEqual(response.data['to_concept_code'], 'bar')
+        self.assertEqual(response.data['to_concept_name'], 'bar')
+        self.assertIsNone(response.data['to_source_name'])
+
     def test_post_using_canonical_url_201(self):  # pylint: disable=too-many-statements
         source = UserSourceFactory(user=self.user, mnemonic='source')
         response = self.client.post(
@@ -613,6 +631,23 @@ class MappingRetrieveUpdateDestroyViewTest(OCLAPITestCase):
         self.mapping.refresh_from_db()
         self.assertTrue(self.mapping.retired)
 
+    def test_hard_delete_403(self):
+        response = self.client.delete(
+            self.mapping.uri + '?hardDelete=true',
+            HTTP_AUTHORIZATION='Token ' + self.token,
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_hard_delete_204(self):
+        token = UserProfileFactory(is_superuser=True, is_staff=True).get_token()
+        response = self.client.delete(
+            self.mapping.uri + '?hardDelete=true',
+            HTTP_AUTHORIZATION='Token ' + token,
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Mapping.objects.filter(id=self.mapping.id).exists())
+
 
 class MappingVersionsViewTest(OCLAPITestCase):
     def setUp(self):
@@ -779,3 +814,69 @@ class MappingExtraRetrieveUpdateDestroyViewTest(OCLAPITestCase):
         self.assertEqual(self.mapping.versions.first().extras, dict(foo='bar', tao='ching'))
         self.mapping.refresh_from_db()
         self.assertEqual(self.mapping.extras, dict(tao='ching'))
+
+
+class MappingReactivateViewTest(OCLAPITestCase):
+    def test_put(self):
+        mapping = MappingFactory(retired=True)
+        self.assertTrue(mapping.retired)
+        self.assertTrue(mapping.get_latest_version().retired)
+        token = mapping.created_by.get_token()
+
+        response = self.client.put(
+            mapping.url + 'reactivate/',
+            HTTP_AUTHORIZATION='Token ' + token,
+        )
+
+        self.assertEqual(response.status_code, 204)
+        mapping.refresh_from_db()
+        self.assertFalse(mapping.retired)
+        self.assertFalse(mapping.get_latest_version().retired)
+        self.assertTrue(mapping.get_latest_version().prev_version.retired)
+
+        response = self.client.put(
+            mapping.url + 'reactivate/',
+            HTTP_AUTHORIZATION='Token ' + token,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data, {'__all__': 'Mapping is already not retired'})
+
+
+class MappingCollectionMembershipViewTest(OCLAPITestCase):
+    def test_get_200(self):
+        parent = OrganizationSourceFactory()
+        mapping1 = MappingFactory(parent=parent)
+        mapping2 = MappingFactory()  # random owner/parent
+        collection1 = OrganizationCollectionFactory(organization=parent.organization)
+        expansion1 = ExpansionFactory(collection_version=collection1)
+        collection1.expansion_uri = expansion1.uri
+        collection1.save()
+        collection2 = OrganizationCollectionFactory(organization=parent.organization)
+        expansion2 = ExpansionFactory(collection_version=collection2)
+        collection2.expansion_uri = expansion2.uri
+        collection2.save()
+        collection3 = OrganizationCollectionFactory()  # random owner/parent
+        expansion3 = ExpansionFactory(collection_version=collection3)
+        collection3.expansion_uri = expansion3.uri
+        collection3.save()
+        expansion1.mappings.add(mapping1)
+        expansion2.mappings.add(mapping1)
+        expansion3.mappings.add(mapping1)
+        expansion1.mappings.add(mapping2)
+        expansion2.mappings.add(mapping2)
+        expansion3.mappings.add(mapping2)
+
+        response = self.client.get(mapping1.url + 'collection-versions/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 2)
+        self.assertEqual(
+            sorted([data['url'] for data in response.data]),
+            sorted([collection2.url, collection1.url])
+        )
+
+        response = self.client.get(mapping2.url + 'collection-versions/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 0)

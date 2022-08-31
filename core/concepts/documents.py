@@ -17,6 +17,7 @@ class ConceptDocument(Document):
     _name = fields.KeywordField(attr='display_name', normalizer='lowercase')
     last_update = fields.DateField(attr='updated_at')
     locale = fields.ListField(fields.KeywordField())
+    synonyms = fields.ListField(fields.KeywordField(normalizer="lowercase"))
     source = fields.KeywordField(attr='parent_resource', normalizer="lowercase")
     owner = fields.KeywordField(attr='owner_name', normalizer="lowercase")
     owner_type = fields.KeywordField(attr='owner_type')
@@ -45,6 +46,10 @@ class ConceptDocument(Document):
         ]
 
     @staticmethod
+    def get_boostable_search_attrs():
+        return dict(id=dict(boost=3), _name=dict(boost=5), synonyms=dict(boost=2, wildcard=True, lower=True))
+
+    @staticmethod
     def prepare_numeric_id(instance):
         try:
             return int(instance.mnemonic)
@@ -68,16 +73,16 @@ class ConceptDocument(Document):
         )
 
     @staticmethod
+    def prepare_synonyms(instance):
+        return list(map(lambda x: x.lower(), instance.names.filter(name__isnull=False).values_list('name', flat=True)))
+
+    @staticmethod
     def prepare_source_version(instance):
         return list(instance.sources.values_list('version', flat=True))
 
     @staticmethod
     def prepare_collection_version(instance):
-        collection_versions = list(instance.collection_set.values_list('version', flat=True))
-        expansion_collection_versions = list(
-            instance.expansion_set.values_list('collection_version__version', flat=True))
-
-        return list(set(collection_versions + expansion_collection_versions))
+        return list(set(instance.expansion_set.values_list('collection_version__version', flat=True)))
 
     @staticmethod
     def prepare_expansion(instance):
@@ -85,19 +90,15 @@ class ConceptDocument(Document):
 
     @staticmethod
     def prepare_collection(instance):
-        collections = list(instance.collection_set.values_list('mnemonic', flat=True))
-        expansion_collections = list(instance.expansion_set.values_list('collection_version__mnemonic', flat=True))
-        return list(set(collections + expansion_collections))
+        return list(set(instance.expansion_set.values_list('collection_version__mnemonic', flat=True)))
 
     @staticmethod
     def prepare_collection_url(instance):
-        return list(set(list(instance.collection_set.values_list('uri', flat=True))))
+        return list(set(list(instance.expansion_set.values_list('collection_version__uri', flat=True))))
 
     @staticmethod
     def prepare_collection_owner_url(instance):
-        collection_owner_urls = [coll.parent_url for coll in instance.collection_set.all()]
-        expansion_collection_owner_urls = [expansion.owner_url for expansion in instance.expansion_set.all()]
-        return list(set(collection_owner_urls + expansion_collection_owner_urls))
+        return list(set(expansion.owner_url for expansion in instance.expansion_set.all()))
 
     @staticmethod
     def prepare_extras(instance):

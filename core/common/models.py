@@ -13,10 +13,10 @@ from django_elasticsearch_dsl.registries import registry
 from django_elasticsearch_dsl.signals import RealTimeSignalProcessor
 from pydash import get
 
-from core.common.services import S3
 from core.common.tasks import update_collection_active_concepts_count, update_collection_active_mappings_count, \
     delete_s3_objects
-from core.common.utils import reverse_resource, reverse_resource_version, parse_updated_since_param, drop_version
+from core.common.utils import reverse_resource, reverse_resource_version, parse_updated_since_param, drop_version, \
+    to_parent_uri, is_canonical_uri, get_export_service
 from core.common.utils import to_owner_uri
 from core.settings import DEFAULT_LOCALE
 from .constants import (
@@ -24,6 +24,7 @@ from .constants import (
     ACCESS_TYPE_VIEW, ACCESS_TYPE_EDIT, SUPER_ADMIN_USER_ID,
     HEAD, PERSIST_NEW_ERROR_MESSAGE, SOURCE_PARENT_CANNOT_BE_NONE, PARENT_RESOURCE_CANNOT_BE_NONE,
     CREATOR_CANNOT_BE_NONE, CANNOT_DELETE_ONLY_VERSION, CUSTOM_VALIDATION_SCHEMA_OPENMRS)
+from .fields import URIField
 from .tasks import handle_save, handle_m2m_changed, seed_children_to_new_version, update_validation_schema, \
     update_source_active_concepts_count, update_source_active_mappings_count
 
@@ -66,9 +67,7 @@ class BaseModel(models.Model):
     is_active = models.BooleanField(default=True)
     extras = models.JSONField(null=True, blank=True, default=dict)
     uri = models.TextField(null=True, blank=True, db_index=True)
-    extras_have_been_encoded = False
-    extras_have_been_decoded = False
-    is_being_saved = False
+    _index = True
 
     @property
     def model_name(self):
@@ -81,6 +80,12 @@ class BaseModel(models.Model):
     def index(self):
         if not get(settings, 'TEST_MODE', False):
             handle_save.delay(self.app_name, self.model_name, self.id)
+
+    @property
+    def should_index(self):
+        if getattr(self, '_index', None) is not None:
+            return self._index
+        return True
 
     def soft_delete(self):
         if self.is_active:
@@ -193,13 +198,13 @@ class CommonLogoModel(models.Model):
     def logo_url(self):
         url = None
         if self.logo_path:
-            url = S3.public_url_for(self.logo_path)
+            url = get_export_service().public_url_for(self.logo_path)
 
         return url
 
     def upload_base64_logo(self, data, name):
         name = self.uri[1:] + name
-        self.logo_path = S3.upload_base64(data, name, False, True)
+        self.logo_path = get_export_service().upload_base64(data, name, False, True)
         self.save()
 
 
@@ -334,14 +339,14 @@ class ConceptContainerModel(VersionedModel):
     user = models.ForeignKey('users.UserProfile', on_delete=models.CASCADE, blank=True, null=True)
     _background_process_ids = ArrayField(models.CharField(max_length=255), default=list, null=True, blank=True)
 
-    canonical_url = models.URLField(null=True, blank=True)
+    canonical_url = URIField(null=True, blank=True)
     identifier = models.JSONField(null=True, blank=True, default=dict)
     contact = models.JSONField(null=True, blank=True, default=dict)
     jurisdiction = models.JSONField(null=True, blank=True, default=dict)
     publisher = models.TextField(null=True, blank=True)
     purpose = models.TextField(null=True, blank=True)
     copyright = models.TextField(null=True, blank=True)
-    revision_date = models.DateField(null=True, blank=True)
+    revision_date = models.DateTimeField(null=True, blank=True)
     text = models.TextField(null=True, blank=True)  # for about description (markup)
     client_configs = GenericRelation(
         'client_configs.ClientConfig', object_id_field='resource_id', content_type_field='resource_type'
@@ -484,6 +489,10 @@ class ConceptContainerModel(VersionedModel):
         generic_export_path = self.generic_export_path(suffix=None)
         super().delete(using=using, keep_parents=keep_parents)
         delete_s3_objects.delay(generic_export_path)
+        self.post_delete_actions()
+
+    def post_delete_actions(self):
+        pass
 
     def delete_pins(self):
         if self.is_head:
@@ -527,12 +536,10 @@ class ConceptContainerModel(VersionedModel):
     def cascade_children_to_expansion(**kwargs):
         pass
 
-    @staticmethod
-    def update_mappings():
+    def update_mappings(self):
         pass
 
-    @staticmethod
-    def seed_references():
+    def seed_references(self):
         pass
 
     @property
@@ -585,19 +592,25 @@ class ConceptContainerModel(VersionedModel):
         errors = {}
 
         obj.is_active = True
+        sync = kwargs.pop('sync', False)
         if user:
             obj.created_by = user
             obj.updated_by = user
-        serializer = SourceDetailSerializer if obj.__class__.__name__ == 'Source' else CollectionDetailSerializer
+        repo_resource_name = obj.__class__.__name__
+        serializer = SourceDetailSerializer if repo_resource_name == 'Source' else CollectionDetailSerializer
         head = obj.head
+        if not head:
+            errors[repo_resource_name.lower()] = 'Version Head not found.'
+            return errors
         obj.snapshot = serializer(head).data
         obj.update_version_data(head)
         obj.save(**kwargs)
 
-        if get(settings, 'TEST_MODE', False):
-            seed_children_to_new_version(obj.resource_type.lower(), obj.id, False)
+        is_test_mode = get(settings, 'TEST_MODE', False)
+        if is_test_mode or sync:
+            seed_children_to_new_version(obj.resource_type.lower(), obj.id, not is_test_mode, sync)
         else:
-            seed_children_to_new_version.delay(obj.resource_type.lower(), obj.id)
+            seed_children_to_new_version.delay(obj.resource_type.lower(), obj.id, True, sync)
 
         if obj.id:
             obj.sibling_versions.update(is_latest_version=False)
@@ -685,7 +698,7 @@ class ConceptContainerModel(VersionedModel):
         self.custom_validation_schema = head.custom_validation_schema
 
     def add_processing(self, process_id):
-        if self.id:
+        if self.id and process_id:
             self.__class__.objects.filter(id=self.id).update(
                 _background_process_ids=CombinedExpression(
                     F('_background_process_ids'),
@@ -747,22 +760,92 @@ class ConceptContainerModel(VersionedModel):
         return path
 
     def get_export_url(self):
-        return S3.url_for(self.export_path)
+        return get_export_service().url_for(self.export_path)
 
     def has_export(self):
-        return S3.exists(self.export_path)
+        return get_export_service().exists(self.export_path)
 
     def can_view_all_content(self, user):
         if get(user, 'is_anonymous'):
             return False
-        return get(user, 'is_staff') or self.user_id == user.id or self.organization.members.filter(id=user.id).exists()
+        return get(
+            user, 'is_staff'
+        ) or self.public_can_view or self.user_id == user.id or self.organization.members.filter(id=user.id).exists()
+
+    @classmethod
+    def resolve_expression_to_version(cls, expression):
+        url = expression
+        namespace = None
+        version = None
+        instance = None
+        if isinstance(expression, dict) and get(expression, 'url'):
+            url = expression['url']
+            namespace = expression.get('namespace', None)
+            version = expression.get('version', None)
+        if url:
+            instance = cls.resolve_reference_expression(url, namespace, version)
+        return instance
+
+    @staticmethod
+    def resolve_reference_expression(url, namespace=None, version=None):
+        lookup_url = url
+        if '|' in lookup_url:
+            lookup_url, version = lookup_url.split('|')
+
+        lookup_url = lookup_url.split('?')[0]
+
+        is_fqdn = is_canonical_uri(lookup_url) or is_canonical_uri(url)
+
+        criteria = models.Q(is_active=True, retired=False)
+        if is_fqdn:
+            resolution_url = lookup_url
+            criteria &= models.Q(canonical_url=resolution_url)
+            if namespace:
+                criteria &= models.Q(models.Q(user__uri=namespace) | models.Q(organization__uri=namespace))
+        else:
+            resolution_url = to_parent_uri(lookup_url)
+            criteria &= models.Q(uri=resolution_url)
+
+        from core.sources.models import Source
+        instance = Source.objects.filter(criteria).first()
+        if not instance:
+            from core.collections.models import Collection
+            instance = Collection.objects.filter(criteria).first()
+
+        if instance:
+            if version:
+                instance = instance.versions.filter(version=version).first()
+            elif instance.is_head:
+                instance = instance.get_latest_released_version() or instance
+
+        if not instance:
+            instance = Source()
+
+        instance.is_fqdn = is_fqdn
+        instance.resolution_url = resolution_url
+        if is_fqdn and instance.id and not instance.canonical_url:
+            instance.canonical_url = resolution_url
+
+        return instance
+
+    def clean(self):
+        super().clean()
+
+        if self.released and not self.revision_date:
+            self.revision_date = timezone.now()
 
 
 class CelerySignalProcessor(RealTimeSignalProcessor):
     def handle_save(self, sender, instance, **kwargs):
-        if settings.ES_SYNC and instance.__class__ in registry.get_models():
-            handle_save.delay(instance.app_name, instance.model_name, instance.id)
+        if settings.ES_SYNC and instance.__class__ in registry.get_models() and instance.should_index:
+            if get(settings, 'TEST_MODE', False):
+                handle_save(instance.app_name, instance.model_name, instance.id)
+            else:
+                handle_save.delay(instance.app_name, instance.model_name, instance.id)
 
     def handle_m2m_changed(self, sender, instance, action, **kwargs):
-        if settings.ES_SYNC and instance.__class__ in registry.get_models():
-            handle_m2m_changed.delay(instance.app_name, instance.model_name, instance.id, action)
+        if settings.ES_SYNC and instance.__class__ in registry.get_models() and instance.should_index:
+            if get(settings, 'TEST_MODE', False):
+                handle_m2m_changed(instance.app_name, instance.model_name, instance.id, action)
+            else:
+                handle_m2m_changed.delay(instance.app_name, instance.model_name, instance.id, action)
