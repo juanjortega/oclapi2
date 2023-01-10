@@ -2,7 +2,7 @@ from django_elasticsearch_dsl import Document, fields
 from django_elasticsearch_dsl.registries import registry
 
 from core.common.utils import jsonify_safe, flatten_dict
-from core.concepts.models import Concept
+from core.concepts.models import Concept, LocalizedText
 
 
 @registry.register_document
@@ -37,13 +37,28 @@ class ConceptDocument(Document):
     created_by = fields.KeywordField(attr='created_by.username')
     name_types = fields.ListField(fields.KeywordField())
     description_types = fields.ListField(fields.KeywordField())
-
+    name_locales = fields.NestedField(attr='names',properties={
+        'name': fields.TextField(),
+        'type': fields.TextField(),
+        'locale': fields.TextField(),
+        'locale_preferred': fields.BooleanField(),
+        'pk': fields.IntegerField(),
+    })
     class Django:
         model = Concept
         fields = [
             'version',
             'external_id',
         ]
+        related_models = [LocalizedText]
+
+    def get_instances_from_related(self, related_instance):
+        """If related_models is set, define how to retrieve the Car instance(s) from the related model.
+        The related_models option should be used with caution because it can lead in the index
+        to the updating of a lot of items.
+        """
+        if isinstance(related_instance, LocalizedText):
+            return related_instance.locale
 
     @staticmethod
     def get_boostable_search_attrs():
