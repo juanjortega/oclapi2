@@ -306,3 +306,4 @@ celery-worker-*.tmp
 postgres-data/*
 es-data/*
 !/**/.gitkeep
+TODO.md
