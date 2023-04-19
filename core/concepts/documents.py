@@ -1,10 +1,15 @@
 from django_elasticsearch_dsl import Document, fields
 from django_elasticsearch_dsl.registries import registry
+from elasticsearch_dsl import analyzer
 
 from core.common.utils import jsonify_safe, flatten_dict
 from core.concepts.models import Concept, LocalizedText
 from core.sources.models import Source
 
+folding_analyzer = analyzer('folding_analyzer',
+                            tokenizer="standard",
+                            filter=["lowercase", "asciifolding"]
+   )
 
 @registry.register_document
 class ConceptDocument(Document):
@@ -39,8 +44,8 @@ class ConceptDocument(Document):
     source_canonical_url = fields.KeywordField(attr='parent.canonical_url')
     name_types = fields.ListField(fields.KeywordField())
     description_types = fields.ListField(fields.KeywordField())
-    name_locales = fields.NestedField(attr='names',properties={
-        'name': fields.TextField(),
+    name_locales = fields.NestedField(attr='names', properties={
+        'name': fields.TextField(analyzer=folding_analyzer),
         'type': fields.TextField(),
         'locale': fields.TextField(),
         'locale_preferred': fields.BooleanField(),
